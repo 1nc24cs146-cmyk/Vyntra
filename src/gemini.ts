@@ -1,3 +1,4 @@
+import { fetchWithRetry } from "./llm";
 export interface GeminiMessage {
   content: string;
   role: "assistant" | "system" | "user";
@@ -35,7 +36,9 @@ export async function* geminiChatStream(
   apiKey: string,
   model: string,
   messages: GeminiMessage[],
-  maxOutputTokens = 8192
+  maxOutputTokens = 8192,
+  temperature = 0.2,
+  signal?: AbortSignal
 ): AsyncGenerator<string, void, unknown> {
   const modelId = geminiModelId(model);
   const systemText = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
@@ -44,16 +47,17 @@ export async function* geminiChatStream(
     .map((m) => ({ parts: [{ text: m.content }], role: m.role === "assistant" ? "model" : "user" }));
   const body: any = {
     contents,
-    generationConfig: { maxOutputTokens, temperature: 0.2 }
+    generationConfig: { maxOutputTokens, temperature }
   };
   if (systemText) {
     body.systemInstruction = { parts: [{ text: systemText }] };
   }
   // Streaming first: SSE lines "data: {...}"
-  const streamRes = await fetch(`${BASE}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`, {
+  const streamRes = await fetchWithRetry(`${BASE}/models/${modelId}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`, {
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
-    method: "POST"
+    method: "POST",
+    signal
   });
   if (streamRes.ok && streamRes.body) {
     const reader = streamRes.body.getReader();
@@ -97,10 +101,11 @@ export async function* geminiChatStream(
     }
   }
   // Fallback: non-streaming generateContent.
-  const res = await fetch(`${BASE}/models/${modelId}:generateContent?key=${encodeURIComponent(apiKey)}`, {
+  const res = await fetchWithRetry(`${BASE}/models/${modelId}:generateContent?key=${encodeURIComponent(apiKey)}`, {
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
-    method: "POST"
+    method: "POST",
+    signal
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");

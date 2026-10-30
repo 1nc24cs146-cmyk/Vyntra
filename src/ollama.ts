@@ -1,3 +1,4 @@
+import { fetchWithRetry } from "./llm";
 export async function listModels(ollamaHost: string): Promise<string[]> {
   const res = await fetchWithTimeout(`${trim(ollamaHost)}/api/tags`, 3000);
   if (!res.ok) {
@@ -27,13 +28,21 @@ export async function* chatStream(
   model: string,
   messages: ChatMessage[],
   signal?: AbortSignal,
-  maxTokens?: number
+  maxTokens?: number,
+  temperature?: number
 ): AsyncGenerator<string, void, unknown> {
   const body: any = { messages, model, stream: true };
+  const options: any = {};
   if (maxTokens) {
-    body.options = { num_predict: maxTokens };
+    options.num_predict = maxTokens;
   }
-  const res = await fetch(`${trim(ollamaHost)}/api/chat`, {
+  if (typeof temperature === "number") {
+    options.temperature = temperature;
+  }
+  if (Object.keys(options).length > 0) {
+    body.options = options;
+  }
+  const res = await fetchWithRetry(`${trim(ollamaHost)}/api/chat`, {
     body: JSON.stringify(body),
     headers: { "Content-Type": "application/json" },
     method: "POST",

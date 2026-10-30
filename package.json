@@ -7,7 +7,9 @@
     "onCommand:localNest.refreshOllama",
     "onCommand:localNest.openDesktopFolder",
     "onCommand:localNest.listDesktop",
-    "onCommand:localNest.setGeminiApiKey"
+    "onCommand:localNest.setGeminiApiKey",
+    "onCommand:localNest.setOpenAIApiKey",
+    "onCommand:localNest.newChat"
   ],
   "categories": [
     "AI",
@@ -43,6 +45,14 @@
       {
         "command": "localNest.setGeminiApiKey",
         "title": "Vyntra: Set Gemini API Key"
+      },
+      {
+        "command": "localNest.setOpenAIApiKey",
+        "title": "Vyntra: Set OpenAI-compatible API Key"
+      },
+      {
+        "command": "localNest.newChat",
+        "title": "Vyntra: New Chat (Clear History)"
       }
     ],
     "configuration": {
@@ -54,20 +64,21 @@
         },
         "localNest.model": {
           "default": "qwen2.5-coder:7b",
-          "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) \u2014 the chat panel lists the models actually pulled on your host and lets you switch.",
+          "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) — the chat panel lists the models actually pulled on your host and lets you switch.",
           "type": "string"
         },
         "localNest.ollamaHost": {
           "default": "http://localhost:11434",
-          "description": "Ollama base URL. Keep localhost for fully local use, or point it at your own remote Ollama host. This extension sends code only to this host, and has no GPU/CUDA settings \u2014 Ollama manages hardware itself and runs on CPU by default.",
+          "description": "Ollama base URL. Keep localhost for fully local use, or point it at your own remote Ollama host. This extension sends code only to this host, and has no GPU/CUDA settings — Ollama manages hardware itself and runs on CPU by default.",
           "type": "string"
         },
         "localNest.provider": {
           "default": "ollama",
-          "description": "Model provider: Ollama (local, private) or Gemini (Google API, gemini-3.8-flash).",
+          "description": "Model provider: Ollama (local, private), Gemini (Google API, gemini-3.8-flash), or OpenAI-compatible (LM Studio, OpenRouter, Groq, any /v1 API).",
           "enum": [
             "ollama",
-            "gemini"
+            "gemini",
+            "openai"
           ],
           "type": "string"
         },
@@ -78,7 +89,7 @@
         },
         "localNest.geminiApiKey": {
           "default": "",
-          "description": "Optional fallback for the Gemini API key. Prefer the secure command \u201cVyntra: Set Gemini API Key\u201d, which stores it in Secret Storage instead of settings.",
+          "description": "Optional fallback for the Gemini API key. Prefer the secure command “Vyntra: Set Gemini API Key”, which stores it in Secret Storage instead of settings.",
           "type": "string"
         },
         "localNest.lowBandwidth": {
@@ -90,6 +101,26 @@
           "default": true,
           "description": "If the selected provider is unreachable on this network, automatically try the other provider (Gemini <-> Ollama) before giving up.",
           "type": "boolean"
+        },
+        "localNest.temperature": {
+          "default": 0.2,
+          "description": "Model temperature: 0 = precise/deterministic code, 0.2 = default for coding, 1 = creative, up to 2 = wild. Applies to Ollama, Gemini and OpenAI-compatible providers.",
+          "type": "number"
+        },
+        "localNest.openaiBaseUrl": {
+          "default": "http://localhost:1234/v1",
+          "description": "OpenAI-compatible base URL, e.g. LM Studio http://localhost:1234/v1, OpenRouter https://openrouter.ai/api/v1, Groq https://api.groq.com/openai/v1.",
+          "type": "string"
+        },
+        "localNest.openaiModel": {
+          "default": "local-model",
+          "description": "Model ID for the OpenAI-compatible provider, as that provider names it.",
+          "type": "string"
+        },
+        "localNest.openaiApiKey": {
+          "default": "",
+          "description": "Optional fallback for the OpenAI-compatible API key. Prefer the secure command Vyntra: Set OpenAI-compatible API Key, which stores it in Secret Storage instead of settings.",
+          "type": "string"
         }
       },
       "title": "Vyntra"
@@ -122,7 +153,7 @@
       ]
     }
   },
-  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity: Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 local Ollama or your own remote Ollama host, no separate IDE, no GPU settings.",
+  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity: multi-turn chat with history, Stop generation, retry on rate limits, temperature control, diff edits, Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits — local Ollama, Gemini 3.8 Flash, or any OpenAI-compatible model, no separate IDE, no GPU settings.",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
@@ -153,7 +184,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.2",
+  "version": "0.9.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"

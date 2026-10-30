@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 import { exec } from "child_process";
 import { checkHealth, chatStream, listModels } from "./ollama";
 import { collectContext, contextToPrompt } from "./context";
-import { isDangerousCommand, parseProposal, ProposedFile, Proposal } from "./proposal";
+import { applyUnifiedDiff, isDangerousCommand, parseDiffProposal, parseProposal, ProposedFile, Proposal } from "./proposal";
+import { estimateTokens, trimHistory, LlmMessage } from "./llm";
+import { checkOpenAi, openAiChatStream } from "./openai";
 import { buildTemplateApp } from "./templates";
 import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
 import { buildRootForPrompt, desktopDir, resolveTargetRoot, TargetKind } from "./desktop";
@@ -36,6 +38,19 @@ interface AgentState {
 }
 let agentState: AgentState | null = null;
 let lastAppliedFiles: string[] = [];
+let conversationHistory: LlmMessage[] = [];
+let currentAbort: AbortController | null = null;
+function stopGeneration() {
+  if (currentAbort) {
+    currentAbort.abort();
+    currentAbort = null;
+    view?.webview.postMessage({ text: "Stopped.", type: "assistant" });
+  }
+}
+function clearConversation() {
+  conversationHistory = [];
+  view?.webview.postMessage({ text: "New chat started — history cleared.", type: "assistant" });
+}
 
 export function activate(context: vscode.ExtensionContext) {
   secretStorage = context.secrets;
@@ -88,6 +103,22 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("localNest.listDesktop", async () => {
       await listDesktopFiles();
     }),
+    vscode.commands.registerCommand("localNest.setOpenAIApiKey", async () => {
+      const key = await vscode.window.showInputBox({
+        password: true,
+        placeHolder: "Paste your API key for your OpenAI-compatible provider (leave blank for local LM Studio)",
+        prompt: "Vyntra stores this in VS Code Secret Storage, not in settings or files."
+      });
+      if (key === undefined) {
+        return;
+      }
+      await secretStorage?.store("localNest.openaiApiKey", key.trim());
+      vscode.window.showInformationMessage("Vyntra: OpenAI-compatible API key saved securely.");
+      await refreshStatus(false);
+    }),
+    vscode.commands.registerCommand("localNest.newChat", async () => {
+      clearConversation();
+    }),
     vscode.commands.registerCommand("localNest.setGeminiApiKey", async () => {
       const key = await vscode.window.showInputBox({
         password: true,
@@ -115,7 +146,10 @@ interface Config {
   lowBandwidth: boolean;
   maxFiles: number;
   model: string;
+  openaiBaseUrl: string;
+  openaiModel: string;
   provider: string;
+  temperature: number;
 }
 
 function getConfig(): Config {
@@ -127,12 +161,21 @@ function getConfig(): Config {
     lowBandwidth: cfg.get<boolean>("lowBandwidth", false),
     maxFiles: cfg.get<number>("maxContextFiles", 8),
     model: cfg.get<string>("model", "qwen2.5-coder:7b"),
-    provider: cfg.get<string>("provider", "ollama")
+    openaiBaseUrl: cfg.get<string>("openaiBaseUrl", "http://localhost:1234/v1"),
+    openaiModel: cfg.get<string>("openaiModel", "local-model"),
+    provider: cfg.get<string>("provider", "ollama"),
+    temperature: cfg.get<number>("temperature", 0.2)
   };
 }
 
 function modelForProvider(cfg: Config): string {
-  return cfg.provider === "gemini" ? cfg.geminiModel : cfg.model;
+  if (cfg.provider === "gemini") {
+    return cfg.geminiModel;
+  }
+  if (cfg.provider === "openai") {
+    return cfg.openaiModel;
+  }
+  return cfg.model;
 }
 
 async function getGeminiKey(): Promise<string> {
@@ -148,6 +191,19 @@ async function getGeminiKey(): Promise<string> {
   return cfg.get<string>("geminiApiKey", "") || process.env.GEMINI_API_KEY || "";
 }
 
+async function getOpenAIKey(): Promise<string> {
+  try {
+    const secret = await secretStorage?.get("localNest.openaiApiKey");
+    if (secret) {
+      return secret;
+    }
+  } catch {
+    // fall through
+  }
+  const cfg = vscode.workspace.getConfiguration("localNest");
+  return cfg.get<string>("openaiApiKey", "") || process.env.OPENAI_API_KEY || "";
+}
+
 async function providerOnline(cfg: Config): Promise<boolean> {
   if (cfg.provider === "gemini") {
     const key = await getGeminiKey();
@@ -156,19 +212,36 @@ async function providerOnline(cfg: Config): Promise<boolean> {
     }
     return checkGemini(key);
   }
+  if (cfg.provider === "openai") {
+    const key = await getOpenAIKey();
+    return checkOpenAi({ apiKey: key, baseUrl: cfg.openaiBaseUrl, model: cfg.openaiModel });
+  }
   return checkHealth(cfg.host);
 }
 
-async function* providerStream(cfg: Config, messages: { content: string; role: "assistant" | "system" | "user" }[]): AsyncGenerator<string, void, unknown> {
-  if (cfg.provider === "gemini") {
-    const key = await getGeminiKey();
-    if (!key) {
-      throw new Error("No Gemini API key set. Run “Vyntra: Set Gemini API Key” from the Command Palette, or pick Ollama as the provider.");
+async function* providerStream(cfg: Config, messages: LlmMessage[]): AsyncGenerator<string, void, unknown> {
+  currentAbort = new AbortController();
+  const signal = currentAbort.signal;
+  try {
+    if (cfg.provider === "gemini") {
+      const key = await getGeminiKey();
+      if (!key) {
+        throw new Error("No Gemini API key set. Run “Vyntra: Set Gemini API Key” from the Command Palette, or pick Ollama as the provider.");
+      }
+      yield* geminiChatStream(key, cfg.geminiModel, messages, cfg.lowBandwidth ? 4096 : 8192, cfg.temperature, signal);
+      return;
     }
-    yield* geminiChatStream(key, cfg.geminiModel, messages, cfg.lowBandwidth ? 4096 : 8192);
-    return;
+    if (cfg.provider === "openai") {
+      const key = await getOpenAIKey();
+      yield* openAiChatStream({ apiKey: key, baseUrl: cfg.openaiBaseUrl, maxTokens: cfg.lowBandwidth ? 4096 : 8192, model: cfg.openaiModel, temperature: cfg.temperature }, messages, signal);
+      return;
+    }
+    yield* chatStream(cfg.host, cfg.model, messages, signal, cfg.lowBandwidth ? 4096 : undefined, cfg.temperature);
+  } finally {
+    if (currentAbort?.signal === signal) {
+      currentAbort = null;
+    }
   }
-  yield* chatStream(cfg.host, cfg.model, messages, undefined, cfg.lowBandwidth ? 4096 : undefined);
 }
 
 function workspaceRootUri(): vscode.Uri | undefined {
@@ -249,6 +322,14 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
     statusBar.tooltip = online ? "Vyntra — Gemini API online, model " + cfg.geminiModel : "Vyntra — Gemini API not reachable. Check your key.";
     view?.webview.postMessage({ host: "Gemini API", model: cfg.geminiModel, models, online, provider: "gemini", type: "status" });
     return { models, online };
+  }
+  if (cfg.provider === "openai") {
+    const key = await getOpenAIKey();
+    const online = await checkOpenAi({ apiKey: key, baseUrl: cfg.openaiBaseUrl, model: cfg.openaiModel });
+    statusBar.text = online ? "◉ OPENAI-COMPAT" : "○ OpenAI host offline";
+    statusBar.tooltip = online ? "Vyntra — OpenAI-compatible host online, model " + cfg.openaiModel : "Vyntra — OpenAI-compatible host not reachable at " + cfg.openaiBaseUrl;
+    view?.webview.postMessage({ host: cfg.openaiBaseUrl, model: cfg.openaiModel, models: [cfg.openaiModel], online, provider: "openai", type: "status" });
+    return { models: [cfg.openaiModel], online };
   }
   try {
     const models = await listModels(cfg.host);
@@ -393,16 +474,19 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     // below, which itself falls back to a major template if needed.
   }
 
-  const messages = [
-    { content: systemPrompt(mode), role: "system" as const },
-    {
-      content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + "\n" + platformInfo(),
-      role: "user" as const
-    }
+  const userTurn: LlmMessage = {
+    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + "\n" + platformInfo(),
+    role: "user"
+  };
+  conversationHistory = trimHistory([...conversationHistory, userTurn]);
+  const messages: LlmMessage[] = [
+    { content: systemPrompt(mode), role: "system" },
+    ...conversationHistory
   ];
 
   let full = "";
   let streamError: any = null;
+  const startedAt = Date.now();
   try {
     for await (const chunk of providerStream(cfg, messages)) {
       full += chunk;
@@ -410,6 +494,17 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     }
   } catch (err: any) {
     streamError = err;
+  }
+  if (!streamError && full) {
+    conversationHistory = trimHistory([...conversationHistory, { content: full, role: "assistant" }]);
+    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    view?.webview.postMessage({ text: "— " + secs + "s · ~" + estimateTokens(full) + " tokens in this reply (estimate, 1 token ≈ 4 chars) · history: " + conversationHistory.length + " message(s) kept", type: "assistant" });
+  }
+  if (streamError && String(streamError?.name || "") === "AbortError") {
+    view?.webview.postMessage({ text: "Generation stopped by you. The partial reply was not saved to history.", type: "assistant" });
+    // Remove the user turn that was not answered, so the next turn is clean.
+    conversationHistory = conversationHistory.slice(0, -1);
+    return;
   }
   if (streamError && cfg.autoFallback) {
     // Any network: if Gemini (internet) fails, try local Ollama; if Ollama
@@ -426,6 +521,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
           view?.webview.postMessage({ text: chunk, type: "stream" });
         }
         streamError = null;
+        if (full) {
+          conversationHistory = trimHistory([...conversationHistory, { content: full, role: "assistant" }]);
+        }
       } catch (err2: any) {
         streamError = err2;
       }
@@ -451,7 +549,40 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   }
 
   if (mode === "agent" || mode === "build") {
-    const proposal = parseProposal(full);
+    let proposal = parseProposal(full);
+    if (proposal.files.length === 0) {
+      // Diff format: model sent small diffs instead of full files.
+      const diffProposal = parseDiffProposal(full);
+      if (diffProposal.files.length > 0) {
+        // Resolve each diff against the current file on disk (hydrated below).
+        const root = currentRequestRoot || workspaceRootUri();
+        const resolved: ProposedFile[] = [];
+        for (const d of diffProposal.files) {
+          let original: string | null = null;
+          if (root) {
+            try {
+              const uri = d.path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(d.path) ? vscode.Uri.file(d.path) : vscode.Uri.joinPath(root, d.path);
+              original = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8");
+            } catch {
+              original = null;
+            }
+          }
+          const applied = original !== null ? applyUnifiedDiff(original, d.content) : null;
+          if (applied !== null) {
+            resolved.push({ content: applied, exists: true, original, path: d.path });
+          } else if (original === null) {
+            // New file diff: added lines are the file.
+            const added = d.content.split("\n").filter((l) => l.startsWith("+") && !l.startsWith("+++")).map((l) => l.slice(1)).join("\n");
+            if (added) {
+              resolved.push({ content: added, exists: false, original: null, path: d.path });
+            }
+          }
+        }
+        if (resolved.length > 0) {
+          proposal = { commands: diffProposal.commands, files: resolved, raw: full };
+        }
+      }
+    }
     if (proposal.files.length > 0) {
       await deliverProposal(proposal, autoApply, mode === "build" ? "Built app ready — see the files below." : "Proposal ready below — nothing has been written yet. Review each file, then approve the ones you want. Commands, if any, run only after you press “Run approved commands”.");
       if (agenticLoopEnabled && autoApply) {
@@ -840,7 +971,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         if (typeof msg.agenticLoop === "boolean") {
           agenticLoopEnabled = msg.agenticLoop;
         }
-        if (msg.provider === "ollama" || msg.provider === "gemini") {
+        if (msg.provider === "ollama" || msg.provider === "gemini" || msg.provider === "openai") {
           const cfg = vscode.workspace.getConfiguration("localNest");
           await cfg.update("provider", msg.provider, vscode.ConfigurationTarget.Global);
         }
@@ -849,6 +980,18 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
           await cfg.update("lowBandwidth", msg.lowBandwidth, vscode.ConfigurationTarget.Global);
         }
         await handleChat(msg.mode as Mode, String(msg.text || ""), msg.autoApply === true, msg.major === true);
+      } else if (msg.type === "stop") {
+        stopGeneration();
+      } else if (msg.type === "newChat") {
+        clearConversation();
+      } else if (msg.type === "setOpenAIKey") {
+        await vscode.commands.executeCommand("localNest.setOpenAIApiKey");
+      } else if (msg.type === "temperature") {
+        const cfg = vscode.workspace.getConfiguration("localNest");
+        const temp = Number(msg.value);
+        if (!Number.isNaN(temp) && temp >= 0 && temp <= 2) {
+          await cfg.update("temperature", temp, vscode.ConfigurationTarget.Global);
+        }
       } else if (msg.type === "continueAgent") {
         await continueAgenticLoop();
       } else if (msg.type === "setGeminiKey") {
@@ -916,7 +1059,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "setModel") {
         const cfg = vscode.workspace.getConfiguration("localNest");
         const provider = cfg.get<string>("provider", "ollama");
-        await cfg.update(provider === "gemini" ? "geminiModel" : "model", String(msg.model), vscode.ConfigurationTarget.Global);
+        await cfg.update(provider === "gemini" ? "geminiModel" : (provider === "openai" ? "openaiModel" : "model"), String(msg.model), vscode.ConfigurationTarget.Global);
         view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "assistant" });
         await refreshStatus(false);
       }
@@ -943,9 +1086,10 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<div id='status'><span><b id='dot'>○</b> <span id='host'>checking…</span></span><button class='small' id='refresh'>Refresh</button></div>",
       "<p style='font-size:12px'>Setup — pick one, no other setup needed: <b>Local (private):</b> install Ollama, run <code>ollama serve</code> + <code>ollama pull qwen2.5-coder:7b</code> (any Ollama model works, or point Ollama Host at your own remote Ollama host). <b>Cloud:</b> press Set Gemini API Key. <b>No model yet:</b> Ask still searches this workspace and Build still creates working templates offline.</p>",
       "<p style='font-size:12px'>Local-first: with Ollama, your code never leaves this machine. With Gemini, code goes only to the Google API you chose — Vyntra has no telemetry and makes no other network calls. No GPU/CUDA settings exist in this extension; Ollama manages hardware itself and runs on CPU by default.</p>",
-      "<label>Provider</label><select id='provider'><option value='ollama'>Ollama (local, private)</option><option value='gemini'>Gemini 3.8 Flash (Google API)</option></select>",
-      "<button class='small' id='setGeminiKey'>Set Gemini API Key (secure)</button>",
+      "<label>Provider</label><select id='provider'><option value='ollama'>Ollama (local, private)</option><option value='gemini'>Gemini 3.8 Flash (Google API)</option><option value='openai'>OpenAI-compatible (LM Studio / OpenRouter / Groq / any /v1 API)</option></select>",
+      "<button class='small' id='setGeminiKey'>Set Gemini API Key (secure)</button><button class='small' id='setOpenAIKey'>Set OpenAI-compatible API Key (secure)</button>",
       "<label>Model</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
+      "<label style='display:block;margin-top:8px'>Temperature (0 = precise code, 1 = creative, 2 = wild) — default 0.2</label><input id='temperature' type='number' min='0' max='2' step='0.1' value='0.2'>",
       "<label style='display:block;margin-top:8px'>Build target</label><select id='target'><option value='workspace'>This project folder</option><option value='desktop'>Desktop (own project folder)</option><option value='home'>Home folder (own project folder)</option><option value='custom'>Custom folder...</option></select>",
       "<input id='customPath' placeholder='Custom folder, e.g. ~/Projects/my-app' style='display:none;margin-top:6px'>",
       "<label style='display:block;margin-top:8px'><input type='checkbox' id='fullAccess' style='width:auto'> Full desktop access — allow files &amp; commands outside this folder (Desktop, Home, custom paths)</label>",
@@ -955,7 +1099,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='majorProject' style='width:auto'> Major project (multi-file, built in batches — also auto-detected for shop, blog, dashboard, full-stack, etc.)</label>",
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='agenticLoop' style='width:auto' checked> Agentic loop — keep working until done (max 5 steps, verify + fix)</label>",
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='lowBandwidth' style='width:auto'> Low-bandwidth / slow network — smaller context, smaller replies</label>",
-      "<button class='primary' id='send'>Send to agent</button>",
+      "<button class='primary' id='send'>Send to agent</button><div><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat (clear history)</button></div>",
       "<button class='small' id='buildPlan' style='display:none'>Build this plan (Agent mode)</button>",
       "<div><button class='small' id='continueAgent'>Verify &amp; fix (Continue agent)</button><button class='small' id='undo'>Undo last approved changes</button><button class='small' id='openFolder'>Open target folder</button><button class='small' id='listDesktop'>List Desktop</button></div>",
       "<div style='margin-top:10px'><label>Run any command in the target folder</label><input id='cmdInput' placeholder='e.g. npm install, git status, python3 -m http.server 8000'><button class='small' id='runAnyCmd'>Run command</button></div>",
@@ -969,6 +1113,10 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "function targetInfo(){ return {target: document.getElementById('target').value, customPath: document.getElementById('customPath').value, fullAccess: document.getElementById('fullAccess').checked}; }",
       "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: document.getElementById('provider').value, target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
       "document.getElementById('setGeminiKey').addEventListener('click', function(){ vscode.postMessage({type:'setGeminiKey'}); });",
+      "document.getElementById('setOpenAIKey').addEventListener('click', function(){ vscode.postMessage({type:'setOpenAIKey'}); });",
+      "document.getElementById('stopBtn').addEventListener('click', function(){ vscode.postMessage({type:'stop'}); });",
+      "document.getElementById('newChat').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
+      "document.getElementById('temperature').addEventListener('change', function(e){ vscode.postMessage({type:'temperature', value:e.target.value}); });",
       "document.getElementById('continueAgent').addEventListener('click', function(){ vscode.postMessage({type:'continueAgent'}); });",
       "document.getElementById('target').addEventListener('change', function(e){ document.getElementById('customPath').style.display = e.target.value==='custom' ? 'block' : 'none'; });",
       "document.getElementById('openFolder').addEventListener('click', function(){ var ti=targetInfo(); vscode.postMessage({type:'openFolder', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); });",
