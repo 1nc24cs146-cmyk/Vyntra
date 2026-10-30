@@ -75,3 +75,21 @@ export async function fetchWithRetry(
   }
   throw lastError || new Error("Request failed");
 }
+
+/**
+ * Lexical retrieval over older chat messages (chat-memory idea,
+ * without a BM25 index): score by shared query tokens, return the top
+ * resultCount messages, each truncated to retrievedCharacters. Tool results
+ * are never stored here — only user/assistant text.
+ */
+export function retrieveOlderChats(query: string, older: LlmMessage[], resultCount = 4, retrievedCharacters = 3000): LlmMessage[] {
+  const tokens = query.toLowerCase().split(/[^a-z0-9_]+/).filter((x) => x.length > 2);
+  if (tokens.length === 0 || older.length === 0) { return []; }
+  const scored = older.map((m) => {
+    const lower = m.content.toLowerCase();
+    let score = 0;
+    for (const tok of tokens) { if (lower.includes(tok)) { score += 1; } }
+    return { m, score };
+  }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score).slice(0, Math.max(1, resultCount));
+  return scored.map((x) => ({ content: x.m.content.slice(0, retrievedCharacters), role: x.m.role }));
+}

@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 LocalNest contributors
+Copyright (c) 2026 NitinKumar Hiremath
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+Developer and how to use (information only, not part of the licence terms above):
+
+Developer: NitinKumar Hiremath.
+
+How to use:
+1. Install it in Antigravity from Open VSX, or from Extensions > Install from VSIX.
+2. Open a project folder, then open the LocalNest panel from the nest icon in the activity bar, or from the Command Palette > LocalNest: Open Chat. You can also type @localnest in chat.
+3. Pick a provider: Ollama (local), Gemini (Set Gemini API Key), or OpenAI-compatible (Set OpenAI-compatible API Key and base URL).
+4. Pick a mode — Ask, Plan, Agent, or Build — type your question or task, and press Send.
+5. Review the proposal, approve files one by one or approve them all, or discard it. Commands run only after you press Run approved commands.
+6. Press Undo last approved changes to restore the previous files if needed.

@@ -1,8 +1,8 @@
 # Vyntra for Antigravity
 
-![Vyntra logo](media/icon.png)
+Developed by NitinKumar Hiremath.
 
-Vyntra is a local-first AI coding agent that lives in the sidebar of your editor. You talk to it, it understands your project, and it changes code only after you review and approve it.
+Vyntra is an AI coding agent that lives in the sidebar of your editor. You talk to it, it understands your project, and it changes code only after you review and approve it.
 
 ## How it works
 
@@ -29,8 +29,17 @@ After you approve all files, it checks the approved files, runs the checks, and 
 **7. You can always undo.**
 The original contents of every file are recorded before approval. “Undo last approved changes” restores edited files and deletes newly created files from that batch.
 
-**8. It works with the model you connect.**
-By default it talks to a local model through Ollama on your own machine, so your code does not leave your machine. You can also point it at your own remote Ollama host, or switch to a cloud model. If the model you picked is not reachable, it tries the other one, and if no model is reachable, Ask still searches your workspace and Build still creates a working app from a built-in template.
+**8. It works with the model you pull in Ollama on your desktop.**
+First, on your desktop, install Ollama, run `ollama serve`, then pull whichever model you want — for example `ollama pull qwen2.5-coder:7b`, `ollama pull llama3.2:3b`, or any other Ollama model. Then pick that model in the panel (or type its exact name), and chat uses that model. No API key, no fixed model, no cloud model — the model you pulled is the model chat uses. If no model is reachable, Ask still searches your workspace and Build still creates a working app from a built-in template.
 
 **9. Build works the same way, for whole apps.**
 In Build mode, tell it what to build — a website, an app, or a larger multi-file project. It generates the complete files, shows them as one proposal for review, and only writes them after approval, following the same steps above.
+
+## How to use
+
+1. Install it in Antigravity from Open VSX, or from Extensions > Install from VSIX.
+2. Open a project folder, then open the LocalNest panel from the nest icon in the activity bar, or from the Command Palette > LocalNest: Open Chat. You can also type `@localnest` in chat.
+3. First, pull a model in Ollama on your desktop: run `ollama serve`, then `ollama pull` whichever model you want (for example `qwen2.5-coder:7b`). Then in the panel, pick that model in Model, or type its exact name and press Use this model in chat — chat will use the model you pulled.
+4. Pick a mode — Ask, Plan, Agent, or Build — type your question or task, and press Send.
+5. Review the proposal: press View to read a proposed file, then approve files one by one or approve them all, or discard the proposal. Commands run only after you press Run approved commands.
+6. If a result is wrong, ask for a fix, press Verify & fix, or press Undo last approved changes to restore the previous files.

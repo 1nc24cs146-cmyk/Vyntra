@@ -24,11 +24,15 @@ export async function checkGemini(apiKey: string): Promise<boolean> {
   if (!apiKey) {
     return false;
   }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await fetch(`${BASE}/models?key=${encodeURIComponent(apiKey)}`);
+    const res = await fetch(`${BASE}/models?key=${encodeURIComponent(apiKey)}`, { signal: controller.signal });
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

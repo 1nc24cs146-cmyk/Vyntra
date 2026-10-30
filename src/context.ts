@@ -18,7 +18,11 @@ const SKIP_DIRS = new Set([
   "venv"
 ]);
 
-export async function collectContext(query: string, maxFiles: number, lowBandwidth = false): Promise<{ files: ContextFile[]; summary: string }> {
+export interface ContextOptions { maxFileBytes?: number; maxIndexCharacters?: number; maxIndexedFiles?: number; }
+export async function collectContext(query: string, maxFiles: number, lowBandwidth = false, opts: ContextOptions = {}): Promise<{ files: ContextFile[]; summary: string }> {
+  const maxFileBytes = opts.maxFileBytes && opts.maxFileBytes > 0 ? opts.maxFileBytes : 262144;
+  const maxIndexCharacters = opts.maxIndexCharacters && opts.maxIndexCharacters > 0 ? opts.maxIndexCharacters : 8000000;
+  const maxIndexedFiles = opts.maxIndexedFiles && opts.maxIndexedFiles > 0 ? opts.maxIndexedFiles : 2000;
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
     return { files: [], summary: "No folder is open. Open a project folder first so Vyntra can read its files." };
@@ -35,7 +39,7 @@ export async function collectContext(query: string, maxFiles: number, lowBandwid
   const candidates = all
     .map((uri) => vscode.workspace.asRelativePath(uri))
     .filter((rel) => !rel.split("/").some((part) => SKIP_DIRS.has(part)))
-    .slice(0, 400);
+    .slice(0, maxIndexedFiles);
 
   // Score by filename first — cheap, and usually the right file wins here.
   const scoredPaths = candidates
@@ -53,6 +57,7 @@ export async function collectContext(query: string, maxFiles: number, lowBandwid
     .slice(0, Math.max(20, maxFiles * 3));
 
   const files: ContextFile[] = [];
+  let indexedChars = 0;
   let budget = lowBandwidth ? 30000 : 60000; // characters total, so a small local model is not drowned
   for (const candidate of scoredPaths) {
     if (files.length >= maxFiles && candidate.score === 0) {
@@ -61,7 +66,7 @@ export async function collectContext(query: string, maxFiles: number, lowBandwid
     try {
       const uri = vscode.Uri.joinPath(root, candidate.rel);
       const stat = await vscode.workspace.fs.stat(uri);
-      if (stat.size > 60000) {
+      if (stat.size > maxFileBytes) {
         continue;
       }
       const bytes = await vscode.workspace.fs.readFile(uri);
@@ -76,6 +81,8 @@ export async function collectContext(query: string, maxFiles: number, lowBandwid
           score += 1;
         }
       }
+      if (indexedChars + text.length > maxIndexCharacters) { continue; }
+      indexedChars += text.length;
       const snippet = text.slice(0, lowBandwidth ? 4000 : 8000);
       files.push({ content: snippet, path: candidate.rel, score });
       budget -= snippet.length;

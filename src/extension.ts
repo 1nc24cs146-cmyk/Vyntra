@@ -1,9 +1,9 @@
 import * as vscode from "vscode";
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { checkHealth, chatStream, listModels } from "./ollama";
 import { collectContext, contextToPrompt } from "./context";
 import { applyUnifiedDiff, isDangerousCommand, parseDiffProposal, parseProposal, ProposedFile, Proposal } from "./proposal";
-import { estimateTokens, trimHistory, LlmMessage } from "./llm";
+import { estimateTokens, retrieveOlderChats, trimHistory, LlmMessage } from "./llm";
 import { checkOpenAi, openAiChatStream } from "./openai";
 import { buildTemplateApp } from "./templates";
 import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
@@ -39,7 +39,47 @@ interface AgentState {
 let agentState: AgentState | null = null;
 let lastAppliedFiles: string[] = [];
 let conversationHistory: LlmMessage[] = [];
+let olderChats: LlmMessage[] = [];
+let lastModels: string[] = [];
+let modelsView: vscode.WebviewView | undefined;
+let extContext: vscode.ExtensionContext | undefined;
+let effectiveOpenAiUrl = "";
+let autoStartTried = false;
 let currentAbort: AbortController | null = null;
+function memoryState() {
+  const cfg = vscode.workspace.getConfiguration("localNest");
+  const scope = cfg.get<string>("chatMemory.scope", "current");
+  return scope === "all" && extContext ? extContext.globalState : extContext!.workspaceState;
+}
+function saveChatMemory() {
+  try { void memoryState().update("localNest.conversationHistory", conversationHistory); } catch { /* memory is best-effort */ }
+}
+function saveOlderChats() {
+  try { void memoryState().update("localNest.olderChatMemory", olderChats.slice(-50)); } catch { /* best-effort */ }
+}
+function loadChatMemory() {
+  try {
+    const h = memoryState().get<LlmMessage[]>("localNest.conversationHistory", []);
+    if (Array.isArray(h)) { conversationHistory = h.filter((m) => m && typeof m.content === "string"); }
+    const o = memoryState().get<LlmMessage[]>("localNest.olderChatMemory", []);
+    if (Array.isArray(o)) { olderChats = o.filter((m) => m && typeof m.content === "string"); }
+  } catch { /* start fresh */ }
+}
+function applyHistory(next: LlmMessage[], maxChars: number): LlmMessage[] {
+  const trimmed = trimHistory(next, maxChars > 0 ? maxChars : 40000, 12);
+  const dropped = next.slice(0, Math.max(0, next.length - trimmed.length));
+  if (dropped.length > 0) {
+    olderChats = [...olderChats, ...dropped].slice(-50);
+    saveOlderChats();
+  }
+  conversationHistory = trimmed;
+  saveChatMemory();
+  return trimmed;
+}
+function postModelsUpdate(models: string[], provider: string) {
+  lastModels = models;
+  modelsView?.webview.postMessage({ models, provider, type: "models" });
+}
 function stopGeneration() {
   if (currentAbort) {
     currentAbort.abort();
@@ -49,11 +89,14 @@ function stopGeneration() {
 }
 function clearConversation() {
   conversationHistory = [];
+  saveChatMemory();
   view?.webview.postMessage({ text: "New chat started — history cleared.", type: "assistant" });
 }
 
 export function activate(context: vscode.ExtensionContext) {
+  extContext = context;
   secretStorage = context.secrets;
+  loadChatMemory();
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "localNest.refreshOllama";
   statusBar.text = "○ Ollama: checking…";
@@ -61,9 +104,75 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar.show();
   context.subscriptions.push(statusBar);
 
+  // Chat participant: @localnest in a chat view.
+  // This is the closest extension surface to an "@ to mention" chat box:
+  // Antigravity's own built-in Ask panel (the Gemini dropdown in the
+  // screenshot) is not an extension surface, so no extension can inject
+  // itself or a model into that panel. This participant, the sidebar
+  // view, and the first-run reveal below are what an extension can do.
+  try {
+    const chatApi: any = (vscode as any).chat;
+    if (chatApi && typeof chatApi.createChatParticipant === "function") {
+      const participant = chatApi.createChatParticipant("localNest", async (request: any, _ctx: any, stream: any, token: any) => {
+        const cfg = getConfig();
+        const prompt = String(request?.prompt || "");
+        const ctx = await collectContext(prompt, cfg.maxFiles, cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles });
+        const online = await providerOnline(cfg);
+        if (!online) {
+          stream.markdown("LocalNest is offline right now — " + ctx.summary + "\n\nStart Ollama (`ollama serve` + a pulled free model), then ask @localnest again. Build mode in the sidebar still works offline from templates.");
+          return {};
+        }
+        const messages: LlmMessage[] = [
+          { content: systemPrompt("ask"), role: "system" },
+          { content: "Workspace context:\n" + ctx.summary + "\n\n" + contextToPrompt(ctx.files) + "\n\nUser request:\n" + prompt, role: "user" }
+        ];
+        const abort = new AbortController();
+        try { token?.onCancellationRequested?.(() => abort.abort()); } catch { /* ignore */ }
+        // providerStream uses its own controller; link cancellation by
+        // aborting the shared signal is not wired through, so stop the
+        // stream loop when the token is cancelled.
+        let cancelled = false;
+        try { token?.onCancellationRequested?.(() => { cancelled = true; }); } catch { /* ignore */ }
+        try {
+          for await (const chunk of providerStream(cfg, messages, modelForMode(cfg, "ask"))) {
+            if (cancelled) { break; }
+            stream.markdown(chunk);
+          }
+        } catch (err: any) {
+          stream.markdown("\n\nLocalNest could not reach the model: " + String(err?.message || err));
+        }
+        return {};
+      });
+      participant.iconPath = vscode.Uri.joinPath(context.extensionUri, "media", "icon.png");
+      context.subscriptions.push(participant);
+    }
+  } catch { /* chat participants are optional; sidebar still works */ }
+
+  // First run after install: reveal the sidebar once, so a new user
+  // actually sees LocalNest instead of having to hunt for its icon.
+  // Only once — it never auto-opens again after that.
+  try {
+    const shown = context.globalState.get<boolean>("localNest.firstRunShown", false);
+    if (!shown) {
+      void context.globalState.update("localNest.firstRunShown", true);
+      setTimeout(() => {
+        void vscode.commands.executeCommand("localNest.chat.focus");
+        void vscode.window.showInformationMessage("LocalNest is installed — ask in the LocalNest sidebar (nest icon in the activity bar), or @localnest in chat.", "Open LocalNest Chat").then((choice) => {
+          if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
+        });
+      }, 800);
+    }
+  } catch { /* first-run reveal is best-effort */ }
+
   const provider = new VyntraViewProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("localNest.chat", provider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    })
+  );
+  const modelsProvider = new LocalNestModelsProvider();
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider("localNest.models", modelsProvider, {
       webviewOptions: { retainContextWhenHidden: true }
     })
   );
@@ -107,7 +216,7 @@ export function activate(context: vscode.ExtensionContext) {
       const key = await vscode.window.showInputBox({
         password: true,
         placeHolder: "Paste your API key for your OpenAI-compatible provider (leave blank for local LM Studio)",
-        prompt: "Vyntra stores this in VS Code Secret Storage, not in settings or files."
+        prompt: "Vyntra stores this in secure storage, not in settings or files."
       });
       if (key === undefined) {
         return;
@@ -119,11 +228,120 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("localNest.newChat", async () => {
       clearConversation();
     }),
+    vscode.commands.registerCommand("localNest.cancelAgent", async () => { stopGeneration(); }),
+    vscode.commands.registerCommand("localNest.setAgentMode", async () => {
+      const pick = await vscode.window.showQuickPick(["ask", "plan", "agent", "build"], { placeHolder: "Pick an agent mode" });
+      if (!pick) { return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: pick, type: "setMode" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.setModel", async () => {
+      const cfg = getConfig();
+      const models = lastModels.length ? lastModels : [modelForProvider(cfg)];
+      const pick = await vscode.window.showQuickPick(models, { placeHolder: "Pick a model for the current provider, or type a custom id" });
+      if (!pick) { return; }
+      const ws = vscode.workspace.getConfiguration("localNest");
+      await ws.update(cfg.provider === "gemini" ? "geminiModel" : (cfg.provider === "openai" ? "openaiModel" : "model"), pick, vscode.ConfigurationTarget.Global);
+      await refreshStatus(false);
+    }),
+    vscode.commands.registerCommand("localNest.continueTask", async () => {
+      if (agentState) { await continueAgenticLoop(); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      view?.webview.postMessage({ text: conversationHistory.length ? "Continuing your previous task — history is still kept (" + conversationHistory.length + " message(s)). Type the next step." : "No agent task is waiting. Ask in Agent or Build mode first.", type: "assistant" });
+    }),
+    vscode.commands.registerCommand("localNest.reviewChanges", async () => {
+      if (!currentProposal) { vscode.window.showInformationMessage("Vyntra: no proposal is waiting to review."); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      view?.webview.postMessage({ proposal: serialiseProposal(currentProposal), type: "proposal" });
+      view?.webview.postMessage({ text: "Reviewing the waiting proposal: " + currentProposal.files.map((f) => f.path).join(", ") + ". Nothing has been written yet.", type: "assistant" });
+    }),
+    vscode.commands.registerCommand("localNest.showArtifacts", async () => {
+      if (lastAppliedFiles.length === 0) { vscode.window.showInformationMessage("Vyntra: no files have been created or updated yet in this session."); return; }
+      const pick = await vscode.window.showQuickPick(lastAppliedFiles, { placeHolder: "Open a file created/updated by the agent" });
+      if (!pick) { return; }
+      const root = currentProposalRoot || workspaceRootUri();
+      if (!root) { return; }
+      const uri = pick.startsWith("/") || /^[A-Za-z]:[\\/]/.test(pick) ? vscode.Uri.file(pick) : vscode.Uri.joinPath(root, pick);
+      const doc = await vscode.workspace.openTextDocument(uri);
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }),
+    vscode.commands.registerCommand("localNest.diagnose", async () => { await runDiagnose(false); }),
+    vscode.commands.registerCommand("localNest.doctor", async () => { await runDiagnose(true); }),
+    vscode.commands.registerCommand("localNest.selfTest", async () => {
+      const result = selfTestText();
+      vscode.window.showInformationMessage("Vyntra self-test: " + result);
+      view?.webview.postMessage({ text: "Self-test:\n" + result, type: "assistant" });
+    }),
+    vscode.commands.registerCommand("localNest.refreshModels", async () => { await refreshStatus(true); }),
+    vscode.commands.registerCommand("localNest.reindexWorkspace", async () => {
+      const cfg = getConfig();
+      const ctx = await collectContext("", cfg.maxFiles, cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles });
+      const msg = "Re-indexed workspace: " + ctx.summary;
+      view?.webview.postMessage({ text: msg, type: "assistant" });
+      vscode.window.showInformationMessage("Vyntra: " + msg);
+    }),
+    vscode.commands.registerCommand("localNest.searchWorkspace", async () => {
+      const q = await vscode.window.showInputBox({ placeHolder: "Search workspace files, e.g. auth, todo, database", prompt: "Search workspace context (keyword match, same index as Ask)" });
+      if (!q) { return; }
+      const cfg = getConfig();
+      const ctx = await collectContext(q, cfg.maxFiles, cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles });
+      if (ctx.files.length === 0) { vscode.window.showInformationMessage("Vyntra: no workspace files matched '" + q + "'."); return; }
+      const pick = await vscode.window.showQuickPick(ctx.files.map((f) => f.path), { placeHolder: "Open a matching file" });
+      if (!pick) { return; }
+      const root = workspaceRootUri();
+      if (!root) { return; }
+      const doc = await vscode.workspace.openTextDocument(vscode.Uri.joinPath(root, pick));
+      await vscode.window.showTextDocument(doc, { preview: false });
+    }),
+    vscode.commands.registerCommand("localNest.editSelection", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.selection.isEmpty) { vscode.window.showWarningMessage("Vyntra: select some code first, then propose an edit."); return; }
+      const code = editor.document.getText(editor.selection);
+      const file = vscode.workspace.asRelativePath(editor.document.uri);
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "agent", text: "Propose a diff-reviewed edit for this code from " + file + ":\n\n```\n" + code + "\n```", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.fixSelection", async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor || editor.selection.isEmpty) { vscode.window.showWarningMessage("Vyntra: select some code first, then ask for a fix."); return; }
+      const code = editor.document.getText(editor.selection);
+      const file = vscode.workspace.asRelativePath(editor.document.uri);
+      const diags = vscode.languages.getDiagnostics(editor.document.uri).slice(0, 10).map((d) => d.message).join("; ");
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "agent", text: "Fix this code from " + file + (diags ? " (diagnostics: " + diags + ")" : "") + ":\n\n```\n" + code + "\n```", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.connectRemote", async () => {
+      const url = await vscode.window.showInputBox({ placeHolder: "http://192.168.1.10:11434", prompt: "Remote Ollama host URL (your own host; code is sent only there)" });
+      if (!url || !/^https?:\/\//.test(url.trim())) { vscode.window.showWarningMessage("Vyntra: that is not an http(s) URL."); return; }
+      await vscode.workspace.getConfiguration("localNest").update("ollamaHost", url.trim(), vscode.ConfigurationTarget.Global);
+      await refreshStatus(true);
+    }),
+    vscode.commands.registerCommand("localNest.configureRemote", async () => { await vscode.commands.executeCommand("localNest.connectRemote"); }),
+    vscode.commands.registerCommand("localNest.disconnectRemote", async () => {
+      await vscode.workspace.getConfiguration("localNest").update("ollamaHost", "http://localhost:11434", vscode.ConfigurationTarget.Global);
+      await refreshStatus(true);
+      vscode.window.showInformationMessage("Vyntra: disconnected remote host — back to local Ollama.");
+    }),
+    vscode.commands.registerCommand("localNest.remoteStatus", async () => {
+      const cfg = getConfig();
+      try {
+        const models = await listModels(cfg.host);
+        const msg = "Remote Ollama status: online at " + cfg.host + " (" + models.length + " model(s): " + models.join(", ") + "). No GPU status is shown — Ollama manages hardware itself.";
+        view?.webview.postMessage({ text: msg, type: "assistant" });
+        vscode.window.showInformationMessage("Vyntra: " + msg);
+      } catch {
+        const msg = "Remote Ollama status: offline at " + cfg.host + ". Check the host is running and reachable from this network.";
+        view?.webview.postMessage({ text: msg, type: "assistant" });
+        vscode.window.showWarningMessage("Vyntra: " + msg);
+      }
+    }),
+    vscode.commands.registerCommand("localNest.openAgent", async () => { await vscode.commands.executeCommand("localNest.openChat"); }),
+    vscode.commands.registerCommand("localNest.newConversation", async () => { clearConversation(); }),
     vscode.commands.registerCommand("localNest.setGeminiApiKey", async () => {
       const key = await vscode.window.showInputBox({
         password: true,
         placeHolder: "Paste your Gemini API key from Google AI Studio",
-        prompt: "Vyntra stores this in VS Code Secret Storage, not in settings or files. Get a key at https://aistudio.google.com/app/apikey"
+        prompt: "Vyntra stores this in secure storage, not in settings or files. Get a key at https://aistudio.google.com/app/apikey"
       });
       if (!key) {
         return;
@@ -140,32 +358,120 @@ export function activate(context: vscode.ExtensionContext) {
 export function deactivate() {}
 
 interface Config {
+  agentMaxFileBytes: number;
+  agentMaxGeneratedTokens: number;
+  agentMaxRounds: number;
+  agentTaskTimeoutMs: number;
   autoFallback: boolean;
+  chatMemoryEnabled: boolean;
+  chatMemoryResultCount: number;
+  chatMemoryRetrievedCharacters: number;
+  contextMaxFileBytes: number;
+  contextMaxIndexCharacters: number;
+  contextMaxIndexedFiles: number;
   geminiModel: string;
+  historyCharacters: number;
   host: string;
   lowBandwidth: boolean;
   maxFiles: number;
   model: string;
+  ollamaAgentThinking: boolean;
+  ollamaAutoStart: boolean;
+  ollamaContextWindow: number;
+  ollamaMaxOutputTokens: number;
   openaiBaseUrl: string;
+  openaiCompatibleUrls: string;
   openaiModel: string;
   provider: string;
+  routingAgentModel: string;
+  routingChatModel: string;
+  routingEditModel: string;
   temperature: number;
 }
 
 function getConfig(): Config {
   const cfg = vscode.workspace.getConfiguration("localNest");
   return {
-    autoFallback: cfg.get<boolean>("autoFallback", true),
+    agentMaxFileBytes: cfg.get<number>("agentMaxFileBytes", 8388608),
+    agentMaxGeneratedTokens: cfg.get<number>("agentMaxGeneratedTokens", 0),
+    agentMaxRounds: cfg.get<number>("agentMaxRounds", 5),
+    agentTaskTimeoutMs: cfg.get<number>("agentTaskTimeoutMs", 0),
+    autoFallback: false,
+    chatMemoryEnabled: cfg.get<boolean>("chatMemory.enabled", true),
+    chatMemoryResultCount: cfg.get<number>("chatMemory.resultCount", 4),
+    chatMemoryRetrievedCharacters: cfg.get<number>("chatMemory.retrievedCharacters", 3000),
+    contextMaxFileBytes: cfg.get<number>("contextMaxFileBytes", 262144),
+    contextMaxIndexCharacters: cfg.get<number>("contextMaxIndexCharacters", 8000000),
+    contextMaxIndexedFiles: cfg.get<number>("contextMaxIndexedFiles", 2000),
     geminiModel: cfg.get<string>("geminiModel", "gemini-3.8-flash"),
+    historyCharacters: cfg.get<number>("historyCharacters", 40000),
     host: cfg.get<string>("ollamaHost", "http://localhost:11434"),
     lowBandwidth: cfg.get<boolean>("lowBandwidth", false),
     maxFiles: cfg.get<number>("maxContextFiles", 8),
     model: cfg.get<string>("model", "qwen2.5-coder:7b"),
+    ollamaAgentThinking: cfg.get<boolean>("ollamaAgentThinking", false),
+    ollamaAutoStart: cfg.get<boolean>("ollamaAutoStart", false),
+    ollamaContextWindow: cfg.get<number>("ollamaContextWindow", 0),
+    ollamaMaxOutputTokens: cfg.get<number>("ollamaMaxOutputTokens", -1),
     openaiBaseUrl: cfg.get<string>("openaiBaseUrl", "http://localhost:1234/v1"),
+    openaiCompatibleUrls: cfg.get<string>("openAICompatibleUrls", "http://127.0.0.1:1234/v1,http://127.0.0.1:8080/v1,http://127.0.0.1:8000/v1"),
     openaiModel: cfg.get<string>("openaiModel", "local-model"),
-    provider: cfg.get<string>("provider", "ollama"),
+    provider: "ollama",
+    routingAgentModel: cfg.get<string>("routing.agentModel", ""),
+    routingChatModel: cfg.get<string>("routing.chatModel", ""),
+    routingEditModel: cfg.get<string>("routing.editModel", ""),
     temperature: cfg.get<number>("temperature", 0.2)
   };
+}
+function openAiUrls(cfg: Config): string[] {
+  const list = [cfg.openaiBaseUrl, ...cfg.openaiCompatibleUrls.split(",").map((s) => s.trim()).filter(Boolean)];
+  return [...new Set(list)];
+}
+function modelForMode(cfg: Config, mode: Mode): string {
+  if ((mode === "agent" || mode === "build") && cfg.routingAgentModel) { return cfg.routingAgentModel; }
+  if ((mode === "ask" || mode === "plan") && cfg.routingChatModel) { return cfg.routingChatModel; }
+  return modelForProvider(cfg);
+}
+function selfTestText(): string {
+  const checks: string[] = [];
+  checks.push("estimateTokens('hello world test')=" + estimateTokens("hello world test") + (estimateTokens("hello world test") === 4 ? " PASS" : " FAIL"));
+  const trimmed = trimHistory(Array.from({ length: 20 }, (_, i) => ({ content: "x".repeat(5000), role: i % 2 === 0 ? "user" as const : "assistant" as const })));
+  checks.push("trimHistory 20x5000 -> " + trimmed.length + " msgs, " + trimmed.reduce((s, m) => s + m.content.length, 0) + " chars" + (trimmed.length <= 12 ? " PASS" : " FAIL"));
+  const diffed = applyUnifiedDiff("line1\nline2\nline3", "@@ -1,3 +1,3 @@\n line1\n-line2\n+line2-fixed\n line3");
+  checks.push("applyUnifiedDiff -> " + (diffed && diffed.includes("line2-fixed") ? "PASS" : "FAIL"));
+  const retrieved = retrieveOlderChats("todo database", [{ content: "todo database schema", role: "user" }, { content: "unrelated weather", role: "assistant" }]);
+  checks.push("retrieveOlderChats -> " + retrieved.length + " hit(s)" + (retrieved.length === 1 ? " PASS" : " FAIL"));
+  return checks.join("\n");
+}
+async function tryAutoStartOllama(host: string): Promise<void> {
+  if (autoStartTried) { return; }
+  autoStartTried = true;
+  if (!/localhost|127\.0\.0\.1/.test(host)) { return; }
+  try {
+    const child = spawn("ollama", ["serve"], { detached: true, stdio: "ignore" });
+    child.unref();
+    await new Promise((r) => setTimeout(r, 1500));
+  } catch { /* already-installed Ollama could not be started; user starts it manually */ }
+}
+async function runDiagnose(includeSelfTest: boolean): Promise<void> {
+  const cfg = getConfig();
+  const online = await providerOnline(cfg);
+  const lines = [
+    "Provider: " + cfg.provider + " / model: " + modelForProvider(cfg),
+    "Host: " + (cfg.provider === "ollama" ? cfg.host : cfg.provider === "openai" ? (effectiveOpenAiUrl || cfg.openaiBaseUrl) : "Gemini API"),
+    "Online: " + (online ? "yes" : "no"),
+    "Workspace: " + (workspaceRootUri()?.fsPath || "none open"),
+    "History: " + conversationHistory.length + " message(s) kept, " + olderChats.length + " older message(s) stored",
+    "Last created/updated: " + (lastAppliedFiles.join(", ") || "none"),
+    "Agent steps ceiling: " + cfg.agentMaxRounds + ", temperature: " + cfg.temperature,
+    "Target: " + targetKind + (targetCustom ? " (" + targetCustom + ")" : "") + ", full desktop access: " + (fullAccessEnabled ? "on" : "off")
+  ];
+  if (includeSelfTest) { lines.push("Self-test:\n" + selfTestText()); }
+  const text = lines.join("\n");
+  const channel = vscode.window.createOutputChannel("LocalNest Diagnose");
+  channel.appendLine(text);
+  channel.show();
+  view?.webview.postMessage({ text: "Diagnose:\n" + text, type: "assistant" });
 }
 
 function modelForProvider(cfg: Config): string {
@@ -214,30 +520,43 @@ async function providerOnline(cfg: Config): Promise<boolean> {
   }
   if (cfg.provider === "openai") {
     const key = await getOpenAIKey();
-    return checkOpenAi({ apiKey: key, baseUrl: cfg.openaiBaseUrl, model: cfg.openaiModel });
+    for (const url of openAiUrls(cfg)) {
+      if (await checkOpenAi({ apiKey: key, baseUrl: url, model: cfg.openaiModel })) { effectiveOpenAiUrl = url; return true; }
+    }
+    return false;
   }
-  return checkHealth(cfg.host);
+  const healthy = await checkHealth(cfg.host);
+  if (!healthy && cfg.ollamaAutoStart) {
+    await tryAutoStartOllama(cfg.host);
+    return checkHealth(cfg.host);
+  }
+  return healthy;
 }
 
-async function* providerStream(cfg: Config, messages: LlmMessage[]): AsyncGenerator<string, void, unknown> {
+async function* providerStream(cfg: Config, messages: LlmMessage[], modelOverride?: string): AsyncGenerator<string, void, unknown> {
   currentAbort = new AbortController();
   const signal = currentAbort.signal;
+  const timer = cfg.agentTaskTimeoutMs > 0 ? setTimeout(() => currentAbort?.abort(), cfg.agentTaskTimeoutMs) : undefined;
   try {
     if (cfg.provider === "gemini") {
       const key = await getGeminiKey();
       if (!key) {
         throw new Error("No Gemini API key set. Run “Vyntra: Set Gemini API Key” from the Command Palette, or pick Ollama as the provider.");
       }
-      yield* geminiChatStream(key, cfg.geminiModel, messages, cfg.lowBandwidth ? 4096 : 8192, cfg.temperature, signal);
+      const maxTokens = cfg.agentMaxGeneratedTokens > 0 ? cfg.agentMaxGeneratedTokens : (cfg.lowBandwidth ? 4096 : 8192);
+      yield* geminiChatStream(key, modelOverride || cfg.geminiModel, messages, maxTokens, cfg.temperature, signal);
       return;
     }
     if (cfg.provider === "openai") {
       const key = await getOpenAIKey();
-      yield* openAiChatStream({ apiKey: key, baseUrl: cfg.openaiBaseUrl, maxTokens: cfg.lowBandwidth ? 4096 : 8192, model: cfg.openaiModel, temperature: cfg.temperature }, messages, signal);
+      const maxTokens = cfg.agentMaxGeneratedTokens > 0 ? cfg.agentMaxGeneratedTokens : (cfg.lowBandwidth ? 4096 : 8192);
+      yield* openAiChatStream({ apiKey: key, baseUrl: effectiveOpenAiUrl || cfg.openaiBaseUrl, maxTokens, model: modelOverride || cfg.openaiModel, temperature: cfg.temperature }, messages, signal);
       return;
     }
-    yield* chatStream(cfg.host, cfg.model, messages, signal, cfg.lowBandwidth ? 4096 : undefined, cfg.temperature);
+    const maxTokens = cfg.ollamaMaxOutputTokens > 0 ? cfg.ollamaMaxOutputTokens : (cfg.ollamaMaxOutputTokens === -1 ? undefined : (cfg.agentMaxGeneratedTokens > 0 ? cfg.agentMaxGeneratedTokens : (cfg.lowBandwidth ? 4096 : undefined)));
+    yield* chatStream(cfg.host, modelOverride || cfg.model, messages, signal, maxTokens, cfg.temperature, cfg.ollamaContextWindow, cfg.ollamaAgentThinking);
   } finally {
+    if (timer) { clearTimeout(timer); }
     if (currentAbort?.signal === signal) {
       currentAbort = null;
     }
@@ -312,6 +631,7 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
       statusBar.text = "○ Gemini: no API key";
       statusBar.tooltip = "Vyntra — run “Vyntra: Set Gemini API Key” to use gemini-3.8-flash.";
       view?.webview.postMessage({ host: "Gemini API", model: cfg.geminiModel, models, online: false, provider: "gemini", type: "status" });
+      postModelsUpdate(models, "gemini");
       if (showToast) {
         vscode.window.showWarningMessage("Vyntra: no Gemini API key set. Run “Vyntra: Set Gemini API Key”, or switch Provider back to Ollama.");
       }
@@ -321,6 +641,7 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
     statusBar.text = online ? "◉ GEMINI 3.8 FLASH" : "○ Gemini offline";
     statusBar.tooltip = online ? "Vyntra — Gemini API online, model " + cfg.geminiModel : "Vyntra — Gemini API not reachable. Check your key.";
     view?.webview.postMessage({ host: "Gemini API", model: cfg.geminiModel, models, online, provider: "gemini", type: "status" });
+    postModelsUpdate(models, "gemini");
     return { models, online };
   }
   if (cfg.provider === "openai") {
@@ -328,19 +649,30 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
     const online = await checkOpenAi({ apiKey: key, baseUrl: cfg.openaiBaseUrl, model: cfg.openaiModel });
     statusBar.text = online ? "◉ OPENAI-COMPAT" : "○ OpenAI host offline";
     statusBar.tooltip = online ? "Vyntra — OpenAI-compatible host online, model " + cfg.openaiModel : "Vyntra — OpenAI-compatible host not reachable at " + cfg.openaiBaseUrl;
-    view?.webview.postMessage({ host: cfg.openaiBaseUrl, model: cfg.openaiModel, models: [cfg.openaiModel], online, provider: "openai", type: "status" });
+    view?.webview.postMessage({ host: effectiveOpenAiUrl || cfg.openaiBaseUrl, model: cfg.openaiModel, models: [cfg.openaiModel], online, provider: "openai", type: "status" });
+    postModelsUpdate([cfg.openaiModel], "openai");
     return { models: [cfg.openaiModel], online };
   }
   try {
     const models = await listModels(cfg.host);
+    // Whichever model the user pulled on their desktop is the model to use:
+    // if the saved model is not among the installed models, switch to the
+    // first installed one instead of failing on a model that was never pulled.
+    let effectiveModel = cfg.model;
+    if (models.length && !models.includes(effectiveModel)) {
+      effectiveModel = models.includes("qwen2.5-coder:7b") ? "qwen2.5-coder:7b" : models[0];
+      await vscode.workspace.getConfiguration("localNest").update("model", effectiveModel, vscode.ConfigurationTarget.Global);
+    }
     statusBar.text = "◉ LOCAL OLLAMA";
-    statusBar.tooltip = "Vyntra — Ollama online at " + cfg.host + " (" + models.length + " models)";
-    view?.webview.postMessage({ host: cfg.host, model: cfg.model, models, online: true, provider: "ollama", type: "status" });
+    statusBar.tooltip = "Vyntra — Ollama online at " + cfg.host + " (" + models.length + " models, using " + effectiveModel + ")";
+    view?.webview.postMessage({ host: cfg.host, model: effectiveModel, models, online: true, provider: "ollama", type: "status" });
+    postModelsUpdate(models, "ollama");
     return { models, online: true };
   } catch {
     statusBar.text = "○ Ollama offline";
     statusBar.tooltip = "Vyntra — Ollama not reachable at " + cfg.host + ". Start Ollama, then click to retry.";
     view?.webview.postMessage({ host: cfg.host, model: cfg.model, models: [], online: false, provider: "ollama", type: "status" });
+    postModelsUpdate([], "ollama");
     if (showToast) {
       vscode.window.showWarningMessage(
         "Vyntra: Ollama is not reachable at " + cfg.host + ". Start it with `ollama serve`, then pull a model (e.g. ollama pull qwen2.5-coder:7b)."
@@ -414,13 +746,14 @@ function systemPrompt(mode: Mode): string {
   ].join("\n");
 }
 
-async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean) {
+async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
   const cfg = getConfig();
+  if (!cfg.chatMemoryEnabled) { conversationHistory = []; }
   currentRequestRoot = buildTargetUri(text, mode);
   agentState = { autoApply, lastOutput: "", mode, step: 1, task: text };
   const online = await providerOnline(cfg);
   const effectiveMaxFiles = cfg.lowBandwidth ? Math.max(3, Math.floor(cfg.maxFiles / 2)) : cfg.maxFiles;
-  const ctx = await collectContext(text, effectiveMaxFiles, cfg.lowBandwidth);
+  const ctx = await collectContext(text, effectiveMaxFiles, cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles });
   const contextPrompt = contextToPrompt(ctx.files);
   const lang = detectLanguage(text);
   const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." : "";
@@ -455,7 +788,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       "",
       cfg.provider === "gemini"
         ? "To go live: run “Vyntra: Set Gemini API Key” (key from https://aistudio.google.com/app/apikey), select Provider: Gemini, model gemini-3.8-flash, then press Refresh."
-        : "To go live: `ollama serve` in a terminal, then `ollama pull qwen2.5-coder:7b` (or another code model), then press Refresh in this panel. You can also point Vyntra at a remote Ollama host in Settings, or switch Provider to Gemini for gemini-3.8-flash. No GPU setup is needed — Ollama runs on CPU by default.",
+        : "To go live: `ollama serve` in a terminal, then `ollama pull qwen2.5-coder:7b` (or another code model), then press Refresh in this panel. You can also point Vyntra at a remote Ollama host in Settings. No GPU setup is needed — Ollama runs on CPU by default.",
       "Tip: Build mode still works offline — it creates a working website/app from a built-in template."
     ].join("\n");
     view?.webview.postMessage({ text: offline, type: "assistant" });
@@ -474,11 +807,13 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     // below, which itself falls back to a major template if needed.
   }
 
+  const retrieved = cfg.chatMemoryEnabled ? retrieveOlderChats(text, olderChats, cfg.chatMemoryResultCount, cfg.chatMemoryRetrievedCharacters) : [];
+  const olderSection = retrieved.length ? "\n\nOlder chat retrieved (lexical match, not current history):\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
   const userTurn: LlmMessage = {
-    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + "\n" + platformInfo(),
+    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + olderSection + "\n" + platformInfo(),
     role: "user"
   };
-  conversationHistory = trimHistory([...conversationHistory, userTurn]);
+  conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
   const messages: LlmMessage[] = [
     { content: systemPrompt(mode), role: "system" },
     ...conversationHistory
@@ -487,8 +822,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   let full = "";
   let streamError: any = null;
   const startedAt = Date.now();
+  const effectiveModel = modelOverride || modelForMode(cfg, mode);
   try {
-    for await (const chunk of providerStream(cfg, messages)) {
+    for await (const chunk of providerStream(cfg, messages, effectiveModel)) {
       full += chunk;
       view?.webview.postMessage({ text: chunk, type: "stream" });
     }
@@ -496,7 +832,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     streamError = err;
   }
   if (!streamError && full) {
-    conversationHistory = trimHistory([...conversationHistory, { content: full, role: "assistant" }]);
+    conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
     view?.webview.postMessage({ text: "— " + secs + "s · ~" + estimateTokens(full) + " tokens in this reply (estimate, 1 token ≈ 4 chars) · history: " + conversationHistory.length + " message(s) kept", type: "assistant" });
   }
@@ -506,28 +842,39 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     conversationHistory = conversationHistory.slice(0, -1);
     return;
   }
-  if (streamError && cfg.autoFallback) {
-    // Any network: if Gemini (internet) fails, try local Ollama; if Ollama
-    // fails, try Gemini if a key is set. This is what makes it work on
-    // offline, slow, hotspot or proxy networks — it degrades, not dies.
-    const fallbackCfg: Config = { ...cfg, provider: cfg.provider === "gemini" ? "ollama" : "gemini" };
-    const fallbackOnline = await providerOnline(fallbackCfg);
-    if (fallbackOnline) {
-      view?.webview.postMessage({ text: "Note: " + modelForProvider(cfg) + " was unreachable on this network, so I switched to " + modelForProvider(fallbackCfg) + " for this reply.", type: "assistant" });
-      full = "";
-      try {
-        for await (const chunk of providerStream(fallbackCfg, messages)) {
-          full += chunk;
-          view?.webview.postMessage({ text: chunk, type: "stream" });
+  // Ollama-only retry: if the saved model was never pulled, Ollama returns
+  // "model not found" — retry the same question with a model the user
+  // actually pulled on their desktop, instead of leaving the question
+  // unanswered. This never falls back to any cloud model.
+  if (streamError && String(streamError?.message || streamError).toLowerCase().includes("not found")) {
+    try {
+      const installed = await listModels(cfg.host);
+      const retryModel = installed.length ? (installed.includes("qwen2.5-coder:7b") ? "qwen2.5-coder:7b" : installed[0]) : "";
+      if (retryModel && retryModel !== effectiveModel) {
+        view?.webview.postMessage({ text: "Note: model `" + effectiveModel + "` was not found in Ollama, so I retried with your pulled model `" + retryModel + "`. Pick that model in Model to avoid this next time.", type: "assistant" });
+        full = "";
+        try {
+          for await (const chunk of providerStream(cfg, messages, retryModel)) {
+            full += chunk;
+            view?.webview.postMessage({ text: chunk, type: "stream" });
+          }
+          streamError = null;
+          if (full) {
+            conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
+          }
+        } catch (err2: any) {
+          streamError = err2;
         }
-        streamError = null;
-        if (full) {
-          conversationHistory = trimHistory([...conversationHistory, { content: full, role: "assistant" }]);
-        }
-      } catch (err2: any) {
-        streamError = err2;
       }
+    } catch {
+      // Keep the original error if the model list itself cannot be read.
     }
+  }
+  // Never end a question silently: an empty stream is an error, not an answer.
+  if (!streamError && !full.trim()) {
+    view?.webview.postMessage({ text: "The model returned an empty reply to that question. Try again, try a different pulled model in Model, or press Test my model — if Test also returns empty, the model itself is not responding and needs a different pulled model.", type: "assistant" });
+    view?.webview.postMessage({ type: "streamDone" });
+    return;
   }
   if (streamError) {
     if (mode === "build") {
@@ -630,9 +977,9 @@ function buildMajorTemplateProposal(text: string): Proposal {
   };
 }
 
-async function chatOnce(cfg: Config, messages: { content: string; role: "assistant" | "system" | "user" }[]): Promise<string> {
+async function chatOnce(cfg: Config, messages: { content: string; role: "assistant" | "system" | "user" }[], modelOverride?: string): Promise<string> {
   let full = "";
-  for await (const chunk of providerStream(cfg, messages)) {
+  for await (const chunk of providerStream(cfg, messages, modelOverride)) {
     full += chunk;
   }
   return full;
@@ -785,6 +1132,10 @@ async function applyFile(path: string): Promise<string> {
   if (!currentProposal) {
     return "No proposal is waiting.";
   }
+  const guardFile = currentProposal.files.find((f) => f.path === path);
+  if (guardFile && Buffer.byteLength(guardFile.content, "utf8") > getConfig().agentMaxFileBytes) {
+    return "Refused to write " + path + ": it exceeds the agent file-size ceiling (" + getConfig().agentMaxFileBytes + " bytes). Split it into smaller files.";
+  }
   const file = currentProposal.files.find((f) => f.path === path);
   if (!file) {
     return "That file is not in the proposal.";
@@ -892,9 +1243,10 @@ async function runAgenticLoop(cfg: Config, firstProposal: Proposal) {
     lastOutput = await runCommands(firstProposal.commands);
   }
   agentState.lastOutput = lastOutput;
-  for (let step = 2; step <= 5; step++) {
+  const maxRounds = cfg.agentMaxRounds > 0 ? cfg.agentMaxRounds : 5;
+  for (let step = 2; step <= maxRounds; step++) {
     agentState.step = step;
-    view?.webview.postMessage({ text: "Agent step " + step + "/5: verifying what was built and fixing anything still missing…", type: "assistant" });
+    view?.webview.postMessage({ text: "Agent step " + step + "/" + maxRounds + ": verifying what was built and fixing anything still missing…", type: "assistant" });
     let verifyText = "";
     try {
       verifyText = await chatOnce(cfg, [
@@ -925,7 +1277,7 @@ async function runAgenticLoop(cfg: Config, firstProposal: Proposal) {
       agentState.lastOutput = lastOutput;
     }
   }
-  view?.webview.postMessage({ text: "Agent loop reached 5 steps. The last batch is applied — check the result and ask for the next fix if anything remains.", type: "assistant" });
+  view?.webview.postMessage({ text: "Agent loop reached " + maxRounds + " steps. The last batch is applied — check the result and ask for the next fix if anything remains.", type: "assistant" });
   agentState = null;
 }
 
@@ -958,6 +1310,48 @@ async function continueAgenticLoop() {
   }
 }
 
+class LocalNestModelsProvider implements vscode.WebviewViewProvider {
+  resolveWebviewView(webviewView: vscode.WebviewView) {
+    modelsView = webviewView;
+    webviewView.webview.options = { enableScripts: true };
+    webviewView.webview.html = "<!DOCTYPE html><html><body style='font-family:var(--vscode-font-family);padding:12px'><h3>Models</h3><p style='color:var(--vscode-descriptionForeground)'>These are the models you pulled in Ollama on your desktop — tap one to use it in chat. The agent chat is in <b>LocalNest Chat</b> — open it below, pick <b>Agent</b>, and type your task there.</p><button id='openAgent' style='width:100%;padding:9px'>Open LocalNest Chat (Agent)</button><div id='list' style='margin-top:10px'>Loading models…</div><script>var vscode=acquireVsCodeApi();document.getElementById('openAgent').addEventListener('click',function(){vscode.postMessage({type:'openAgentChat'});});window.addEventListener('message',function(ev){var m=ev.data;if(m.type==='models'){var el=document.getElementById('list');el.innerHTML='';if(!m.models || !m.models.length){el.innerHTML='No free models installed yet. Start Ollama (ollama serve), then pull a free one in LocalNest Chat:<br>';['qwen2.5-coder:7b','llama3.2:3b','mistral:7b'].forEach(function(name){var b=document.createElement('button');b.textContent='Pull '+name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'pullModel',model:name});});el.appendChild(b);});return;}m.models.forEach(function(name){var b=document.createElement('button');b.textContent=name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'setModel',model:name});});el.appendChild(b);});}});</script></body></html>";
+    webviewView.webview.onDidReceiveMessage(async (msg: any) => {
+      if (msg.type === "setModel") {
+        await vscode.workspace.getConfiguration("localNest").update("model", String(msg.model), vscode.ConfigurationTarget.Global);
+        await refreshStatus(false);
+      } else if (msg.type === "downloadModel") {
+        const model = String(msg.model || "").trim();
+        if (model) {
+          const terminal = vscode.window.createTerminal("Ollama pull " + model);
+          terminal.show();
+          terminal.sendText("ollama pull " + model);
+          view?.webview.postMessage({ text: "Downloading " + model + " in the terminal — wait for it to finish, then press Continue to chat.", type: "setupStatus" });
+        }
+      } else if (msg.type === "continueToChat") {
+        const model = String(msg.model || "").trim() || getConfig().model;
+        await vscode.workspace.getConfiguration("localNest").update("model", model, vscode.ConfigurationTarget.Global);
+        try {
+          const installed = await listModels(getConfig().host);
+          if (installed.includes(model)) {
+            view?.webview.postMessage({ type: "showChat" });
+          } else {
+            view?.webview.postMessage({ text: "Model " + model + " is not downloaded yet — press Download selected model, wait for the terminal pull to finish, then press Continue to chat again.", type: "setupStatus" });
+          }
+        } catch {
+          view?.webview.postMessage({ text: "Ollama is not reachable at " + getConfig().host + " — start it with ollama serve, then try again.", type: "setupStatus" });
+        }
+      } else if (msg.type === "pullModel") {
+        const model = String(msg.model || "").trim();
+        if (model) { const terminal = vscode.window.createTerminal("Ollama pull " + model); terminal.show(); terminal.sendText("ollama pull " + model); }
+      } else if (msg.type === "openAgentChat") {
+        await vscode.commands.executeCommand("localNest.chat.focus");
+        setTimeout(() => { view?.webview.postMessage({ mode: "agent", type: "setMode" }); }, 400);
+      }
+    });
+    void refreshStatus(false);
+  }
+}
+
 class VyntraViewProvider implements vscode.WebviewViewProvider {
   constructor(private readonly extContext: vscode.ExtensionContext) {}
 
@@ -979,7 +1373,14 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
           const cfg = vscode.workspace.getConfiguration("localNest");
           await cfg.update("lowBandwidth", msg.lowBandwidth, vscode.ConfigurationTarget.Global);
         }
-        await handleChat(msg.mode as Mode, String(msg.text || ""), msg.autoApply === true, msg.major === true);
+        try {
+          await handleChat(msg.mode as Mode, String(msg.text || ""), msg.autoApply === true, msg.major === true);
+        } catch (err: any) {
+          view?.webview.postMessage({ text: "LocalNest chat failed: " + String(err?.message || err) + "\nThis build uses free Ollama only — no API key. Start Ollama first (ollama serve), pull a free model (e.g. ollama pull qwen2.5-coder:7b), then press Refresh.", type: "assistant" });
+          view?.webview.postMessage({ type: "streamDone" });
+        }
+      } else if (msg.type === "setMode") {
+        view?.webview.postMessage({ mode: msg.mode, type: "setMode" });
       } else if (msg.type === "stop") {
         stopGeneration();
       } else if (msg.type === "newChat") {
@@ -1056,11 +1457,30 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         await undoLastApply();
       } else if (msg.type === "refresh") {
         await refreshStatus(true);
+      } else if (msg.type === "diagnose") {
+        await runDiagnose(false);
+      } else if (msg.type === "testModel") {
+        const testCfg = getConfig();
+        view?.webview.postMessage({ text: "Testing model `" + testCfg.model + "` at " + testCfg.host + " — asking it for one short sentence…", type: "assistant" });
+        try {
+          const reply = await chatOnce(testCfg, [{ content: "Reply with exactly one short sentence: LocalNest test OK.", role: "user" }]);
+          view?.webview.postMessage({ text: reply ? "Test OK — model `" + testCfg.model + "` answered: " + reply : "Test failed — model `" + testCfg.model + "` returned an empty reply. Try a different pulled model.", type: "assistant" });
+        } catch (err: any) {
+          view?.webview.postMessage({ text: "Test failed — model `" + testCfg.model + "` did not answer: " + String(err?.message || err) + "\nCheck: Ollama is running (ollama serve), the model is pulled (ollama list), and Model in this panel matches a pulled model.", type: "assistant" });
+        }
+      } else if (msg.type === "pullModel") {
+        const model = String(msg.model || "").trim();
+        if (model) {
+          const terminal = vscode.window.createTerminal("Ollama pull " + model);
+          terminal.show();
+          terminal.sendText("ollama pull " + model);
+          view?.webview.postMessage({ text: "Pulling free model " + model + " in the terminal — wait for it to finish, then press Refresh and pick it in Model.", type: "assistant" });
+        }
       } else if (msg.type === "setModel") {
         const cfg = vscode.workspace.getConfiguration("localNest");
-        const provider = cfg.get<string>("provider", "ollama");
-        await cfg.update(provider === "gemini" ? "geminiModel" : (provider === "openai" ? "openaiModel" : "model"), String(msg.model), vscode.ConfigurationTarget.Global);
+        await cfg.update("model", String(msg.model), vscode.ConfigurationTarget.Global);
         view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "assistant" });
+        view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "setupStatus" });
         await refreshStatus(false);
       }
     });
@@ -1082,49 +1502,42 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "#chat{margin-top:12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:8px;padding:9px;margin:8px 0} .msg.user{background:var(--vscode-editor-background)} .msg.ai{background:var(--vscode-sideBar-background)}",
       "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin-top:12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
       "</style></head><body>",
-      "<h3>Vyntra</h3><p>Local-first, plug-and-play AI coding agent for VS Code / Antigravity. No separate IDE, no GPU configuration. Plan changes, review every edit before it is written, then verify it. Install, pick a model, ask.</p>",
+      "<h3>Vyntra</h3><p>AI coding agent for Antigravity. First pick an Ollama model, download it, then chat.</p>",
       "<div id='status'><span><b id='dot'>○</b> <span id='host'>checking…</span></span><button class='small' id='refresh'>Refresh</button></div>",
-      "<p style='font-size:12px'>Setup — pick one, no other setup needed: <b>Local (private):</b> install Ollama, run <code>ollama serve</code> + <code>ollama pull qwen2.5-coder:7b</code> (any Ollama model works, or point Ollama Host at your own remote Ollama host). <b>Cloud:</b> press Set Gemini API Key. <b>No model yet:</b> Ask still searches this workspace and Build still creates working templates offline.</p>",
-      "<p style='font-size:12px'>Local-first: with Ollama, your code never leaves this machine. With Gemini, code goes only to the Google API you chose — Vyntra has no telemetry and makes no other network calls. No GPU/CUDA settings exist in this extension; Ollama manages hardware itself and runs on CPU by default.</p>",
-      "<label>Provider</label><select id='provider'><option value='ollama'>Ollama (local, private)</option><option value='gemini'>Gemini 3.8 Flash (Google API)</option><option value='openai'>OpenAI-compatible (LM Studio / OpenRouter / Groq / any /v1 API)</option></select>",
-      "<button class='small' id='setGeminiKey'>Set Gemini API Key (secure)</button><button class='small' id='setOpenAIKey'>Set OpenAI-compatible API Key (secure)</button>",
-      "<label>Model</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
-      "<label style='display:block;margin-top:8px'>Temperature (0 = precise code, 1 = creative, 2 = wild) — default 0.2</label><input id='temperature' type='number' min='0' max='2' step='0.1' value='0.2'>",
-      "<label style='display:block;margin-top:8px'>Build target</label><select id='target'><option value='workspace'>This project folder</option><option value='desktop'>Desktop (own project folder)</option><option value='home'>Home folder (own project folder)</option><option value='custom'>Custom folder...</option></select>",
-      "<input id='customPath' placeholder='Custom folder, e.g. ~/Projects/my-app' style='display:none;margin-top:6px'>",
-      "<label style='display:block;margin-top:8px'><input type='checkbox' id='fullAccess' style='width:auto'> Full desktop access — allow files &amp; commands outside this folder (Desktop, Home, custom paths)</label>",
+      "<div id='setup'>",
+      "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat. No other options are shown here.</p>",
+      "<label>Available Ollama models</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
+      "<div id='setupStatus' style='margin-top:8px;color:var(--vscode-descriptionForeground)'></div>",
+      "<button class='primary' id='downloadModel'>Download selected model</button>",
+      "<button class='primary' id='continueChat'>Continue to chat →</button>",
+      "</div>",
+      "<div id='chatStage' style='display:none'>",
+      "<button class='small' id='changeModel'>← Change model</button>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button></div>",
-      "<textarea id='input' placeholder='Ask anything, or in Build mode: create a todo website, a weather app, a portfolio…'></textarea>",
-      "<label style='display:block;margin-top:8px'><input type='checkbox' id='autoApply' style='width:auto'> Auto-create without review — skips per-file approval (not the default workflow; you can still Undo)</label>",
-      "<label style='display:block;margin-top:4px'><input type='checkbox' id='majorProject' style='width:auto'> Major project (multi-file, built in batches — also auto-detected for shop, blog, dashboard, full-stack, etc.)</label>",
-      "<label style='display:block;margin-top:4px'><input type='checkbox' id='agenticLoop' style='width:auto' checked> Agentic loop — keep working until done (max 5 steps, verify + fix)</label>",
-      "<label style='display:block;margin-top:4px'><input type='checkbox' id='lowBandwidth' style='width:auto'> Low-bandwidth / slow network — smaller context, smaller replies</label>",
+      "<textarea id='input' placeholder='Ask anything — press Enter to send, Shift+Enter for a new line. In Build mode: create a todo website, a weather app, a portfolio…'></textarea>",
       "<button class='primary' id='send'>Send to agent</button><div><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat (clear history)</button></div>",
       "<button class='small' id='buildPlan' style='display:none'>Build this plan (Agent mode)</button>",
-      "<div><button class='small' id='continueAgent'>Verify &amp; fix (Continue agent)</button><button class='small' id='undo'>Undo last approved changes</button><button class='small' id='openFolder'>Open target folder</button><button class='small' id='listDesktop'>List Desktop</button></div>",
-      "<div style='margin-top:10px'><label>Run any command in the target folder</label><input id='cmdInput' placeholder='e.g. npm install, git status, python3 -m http.server 8000'><button class='small' id='runAnyCmd'>Run command</button></div>",
       "<div id='proposal'><b>Proposal — nothing written yet</b><div id='files'></div><div id='cmds'></div>",
       "<button class='primary' id='approveAll'>Approve all files</button>",
       "<button class='small' id='runCmds'>Run approved commands</button><button class='small' id='reject'>Discard proposal</button></div>",
       "<div id='chat'></div>",
+      "</div>",
+      "<div style='display:none'><select id='target'><option value='workspace'>This project folder</option></select><input id='customPath'><input type='checkbox' id='fullAccess'><input type='checkbox' id='autoApply'><input type='checkbox' id='majorProject'><input type='checkbox' id='agenticLoop' checked><input type='checkbox' id='lowBandwidth'><input id='temperature' type='number' value='0.2'></div>",
       "<script>",
       "var vscode = acquireVsCodeApi(); var mode = 'ask'; var currentBubble = null; var lastPlan = '';",
       "function addMsg(text, cls){ var d=document.createElement('div'); d.className='msg '+cls; d.textContent=text; document.getElementById('chat').appendChild(d); return d; }",
       "function targetInfo(){ return {target: document.getElementById('target').value, customPath: document.getElementById('customPath').value, fullAccess: document.getElementById('fullAccess').checked}; }",
-      "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: document.getElementById('provider').value, target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
-      "document.getElementById('setGeminiKey').addEventListener('click', function(){ vscode.postMessage({type:'setGeminiKey'}); });",
-      "document.getElementById('setOpenAIKey').addEventListener('click', function(){ vscode.postMessage({type:'setOpenAIKey'}); });",
+      "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; document.getElementById('input').value=''; addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
       "document.getElementById('stopBtn').addEventListener('click', function(){ vscode.postMessage({type:'stop'}); });",
       "document.getElementById('newChat').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
+      "document.getElementById('downloadModel').addEventListener('click', function(){ var m=document.getElementById('model').value; vscode.postMessage({type:'downloadModel', model:m}); });",
+      "document.getElementById('continueChat').addEventListener('click', function(){ var m=document.getElementById('model').value; vscode.postMessage({type:'continueToChat', model:m}); });",
+      "document.getElementById('changeModel').addEventListener('click', function(){ document.getElementById('chatStage').style.display='none'; document.getElementById('setup').style.display='block'; vscode.postMessage({type:'refresh'}); });",
+      "document.getElementById('model').addEventListener('change', function(e){ vscode.postMessage({type:'setModel', model:e.target.value}); });",
       "document.getElementById('temperature').addEventListener('change', function(e){ vscode.postMessage({type:'temperature', value:e.target.value}); });",
-      "document.getElementById('continueAgent').addEventListener('click', function(){ vscode.postMessage({type:'continueAgent'}); });",
-      "document.getElementById('target').addEventListener('change', function(e){ document.getElementById('customPath').style.display = e.target.value==='custom' ? 'block' : 'none'; });",
-      "document.getElementById('openFolder').addEventListener('click', function(){ var ti=targetInfo(); vscode.postMessage({type:'openFolder', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); });",
-      "document.getElementById('listDesktop').addEventListener('click', function(){ vscode.postMessage({type:'listDesktop'}); });",
-      "document.getElementById('runAnyCmd').addEventListener('click', function(){ var c=document.getElementById('cmdInput').value.trim(); if(!c) return; addMsg('Run: '+c,'user'); var ti=targetInfo(); vscode.postMessage({type:'runCommand', command:c, target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); });",
       "document.getElementById('send').addEventListener('click', send);",
-      "document.getElementById('buildPlan').addEventListener('click', function(){ if(!lastPlan) return; addMsg('Build this plan','user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); mode='agent'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')==='agent'); }); vscode.postMessage({type:'chat', mode:'agent', text:'Build this plan exactly:\n'+lastPlan, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: document.getElementById('provider').value, target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); document.getElementById('buildPlan').style.display='none'; });",
-      "document.getElementById('input').addEventListener('keydown', function(e){ if(e.key==='Enter' && (e.metaKey || e.ctrlKey)){ send(); } });",
+      "document.getElementById('buildPlan').addEventListener('click', function(){ if(!lastPlan) return; addMsg('Build this plan','user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); mode='agent'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')==='agent'); }); vscode.postMessage({type:'chat', mode:'agent', text:'Build this plan exactly:\n'+lastPlan, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); document.getElementById('buildPlan').style.display='none'; });",
+      "document.getElementById('input').addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });",
       "document.querySelectorAll('.modes button').forEach(function(b){ b.addEventListener('click', function(){ mode=b.getAttribute('data-mode'); document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x===b); }); }); });",
       "document.getElementById('refresh').addEventListener('click', function(){ vscode.postMessage({type:'refresh'}); });",
       "document.getElementById('undo').addEventListener('click', function(){ vscode.postMessage({type:'undo'}); });",
@@ -1133,12 +1546,13 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('reject').addEventListener('click', function(){ document.getElementById('proposal').style.display='none'; vscode.postMessage({type:'rejectProposal'}); });",
       "document.getElementById('runCmds').addEventListener('click', function(){ vscode.postMessage({type:'runCommands'}); });",
       "window.addEventListener('message', function(ev){ var m=ev.data;",
-      " if(m.type==='status'){ var label = m.provider==='gemini' ? 'GEMINI 3.8 FLASH' : 'LOCAL OLLAMA'; document.getElementById('dot').textContent = m.online ? '◉ '+label : '○ '+(m.provider==='gemini' ? 'Gemini offline / no key' : 'Ollama offline'); document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — '+(m.provider==='gemini' ? 'set API key to go live' : 'start Ollama to go live')); if(m.provider) document.getElementById('provider').value=m.provider; var sel=document.getElementById('model'); if(m.models && m.models.length){ sel.innerHTML=''; m.models.forEach(function(name){ var o=document.createElement('option'); o.textContent=name; o.value=name; if(name===m.model) o.selected=true; sel.appendChild(o); }); } }",
+      " if(m.type==='status'){ document.getElementById('dot').textContent = m.online ? '◉ FREE OLLAMA' : '○ Ollama offline'; document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
-      " else if(m.type==='assistant'){ currentBubble=null; addMsg(m.text,'ai'); }",
-      " else if(m.type==='streamDone'){ currentBubble=null; }",
-      " else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
+      " else if(m.type==='assistant'){ if(currentBubble){ currentBubble.remove(); currentBubble=null; } addMsg(m.text,'ai'); }",
+      " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",
+      " else if(m.type==='setupStatus'){ document.getElementById('setupStatus').textContent=m.text; } else if(m.type==='showChat'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='block'; } else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
       " else if(m.type==='prefill'){ document.getElementById('input').value=m.text; mode=m.mode||'ask'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); send(); }",
+      " else if(m.type==='setMode'){ mode=m.mode; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); }",
       " else if(m.type==='proposal'){ var box=document.getElementById('proposal'); box.style.display='block'; var files=document.getElementById('files'); files.innerHTML=''; m.proposal.files.forEach(function(f){ var row=document.createElement('div'); row.textContent=(f.exists?'Update: ':'New file: ')+f.path+' '; var vb=document.createElement('button'); vb.className='small'; vb.textContent='View (review)'; vb.addEventListener('click', function(){ vscode.postMessage({type:'viewProposalFile', path:f.path}); }); row.appendChild(vb); var b=document.createElement('button'); b.className='small'; b.textContent='Approve this file'; b.addEventListener('click', function(){ vscode.postMessage({type:'approveFile', path:f.path}); }); row.appendChild(b); files.appendChild(row); if(f.preview){ var pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:#ddd;padding:6px;font-size:11px'; pre.textContent=f.preview; files.appendChild(pre); } }); var cmds=document.getElementById('cmds'); cmds.textContent = m.proposal.commands.length ? 'Commands (run only on approval): '+m.proposal.commands.join('  •  ') : 'No commands proposed.'; }",
       "});",
       "</script></body></html>"

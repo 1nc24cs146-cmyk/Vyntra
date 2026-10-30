@@ -29,15 +29,21 @@ export async function* chatStream(
   messages: ChatMessage[],
   signal?: AbortSignal,
   maxTokens?: number,
-  temperature?: number
+  temperature?: number,
+  contextWindow?: number,
+  think?: boolean
 ): AsyncGenerator<string, void, unknown> {
   const body: any = { messages, model, stream: true };
+  if (typeof think === "boolean") { body.think = think; }
   const options: any = {};
   if (maxTokens) {
     options.num_predict = maxTokens;
   }
   if (typeof temperature === "number") {
     options.temperature = temperature;
+  }
+  if (contextWindow && contextWindow > 0) {
+    options.num_ctx = contextWindow;
   }
   if (Object.keys(options).length > 0) {
     body.options = options;
@@ -73,6 +79,10 @@ export async function* chatStream(
           const parsed = JSON.parse(trimmed);
           if (typeof parsed.message?.content === "string" && parsed.message.content) {
             yield parsed.message.content;
+          } else if (typeof parsed.message?.thinking === "string" && parsed.message.thinking) {
+            // Reasoning models (e.g. deepseek-r1) put their reply in
+            // `thinking` first — without this, chat would look silent.
+            yield parsed.message.thinking;
           }
           if (parsed.done) {
             return;
@@ -87,6 +97,8 @@ export async function* chatStream(
         const parsed = JSON.parse(buffer.trim());
         if (parsed.message?.content) {
           yield parsed.message.content;
+        } else if (parsed.message?.thinking) {
+          yield parsed.message.thinking;
         }
       } catch {
         // ignore trailing fragment

@@ -7,9 +7,30 @@
     "onCommand:localNest.refreshOllama",
     "onCommand:localNest.openDesktopFolder",
     "onCommand:localNest.listDesktop",
-    "onCommand:localNest.setGeminiApiKey",
-    "onCommand:localNest.setOpenAIApiKey",
-    "onCommand:localNest.newChat"
+    "onCommand:localNest.newChat",
+    "onView:localNest.models",
+    "onCommand:localNest.cancelAgent",
+    "onCommand:localNest.setAgentMode",
+    "onCommand:localNest.setModel",
+    "onCommand:localNest.continueTask",
+    "onCommand:localNest.reviewChanges",
+    "onCommand:localNest.showArtifacts",
+    "onCommand:localNest.diagnose",
+    "onCommand:localNest.doctor",
+    "onCommand:localNest.selfTest",
+    "onCommand:localNest.refreshModels",
+    "onCommand:localNest.reindexWorkspace",
+    "onCommand:localNest.searchWorkspace",
+    "onCommand:localNest.editSelection",
+    "onCommand:localNest.fixSelection",
+    "onCommand:localNest.connectRemote",
+    "onCommand:localNest.disconnectRemote",
+    "onCommand:localNest.remoteStatus",
+    "onCommand:localNest.configureRemote",
+    "onCommand:localNest.openAgent",
+    "onCommand:localNest.newConversation",
+    "onStartupFinished",
+    "onChatParticipant:localNest"
   ],
   "categories": [
     "AI",
@@ -43,16 +64,88 @@
         "title": "Vyntra: List Desktop Files"
       },
       {
-        "command": "localNest.setGeminiApiKey",
-        "title": "Vyntra: Set Gemini API Key"
-      },
-      {
-        "command": "localNest.setOpenAIApiKey",
-        "title": "Vyntra: Set OpenAI-compatible API Key"
-      },
-      {
         "command": "localNest.newChat",
         "title": "Vyntra: New Chat (Clear History)"
+      },
+      {
+        "command": "localNest.cancelAgent",
+        "title": "Vyntra: Cancel Agent"
+      },
+      {
+        "command": "localNest.setAgentMode",
+        "title": "Vyntra: Set Agent Mode"
+      },
+      {
+        "command": "localNest.setModel",
+        "title": "Vyntra: Set Model"
+      },
+      {
+        "command": "localNest.continueTask",
+        "title": "Vyntra: Continue Previous Task"
+      },
+      {
+        "command": "localNest.reviewChanges",
+        "title": "Vyntra: Review Changes"
+      },
+      {
+        "command": "localNest.showArtifacts",
+        "title": "Vyntra: Show Artifacts"
+      },
+      {
+        "command": "localNest.diagnose",
+        "title": "Vyntra: Diagnose Installation"
+      },
+      {
+        "command": "localNest.doctor",
+        "title": "Vyntra: Doctor"
+      },
+      {
+        "command": "localNest.selfTest",
+        "title": "Vyntra: Run Self-Test"
+      },
+      {
+        "command": "localNest.refreshModels",
+        "title": "Vyntra: Refresh Models"
+      },
+      {
+        "command": "localNest.reindexWorkspace",
+        "title": "Vyntra: Re-index Workspace Context"
+      },
+      {
+        "command": "localNest.searchWorkspace",
+        "title": "Vyntra: Search Workspace Context"
+      },
+      {
+        "command": "localNest.editSelection",
+        "title": "Vyntra: Propose a Diff-Reviewed Edit"
+      },
+      {
+        "command": "localNest.fixSelection",
+        "title": "Vyntra: Fix Selected Code or Diagnostics"
+      },
+      {
+        "command": "localNest.connectRemote",
+        "title": "Vyntra: Connect to Remote Ollama Host"
+      },
+      {
+        "command": "localNest.disconnectRemote",
+        "title": "Vyntra: Disconnect Remote Ollama Host"
+      },
+      {
+        "command": "localNest.remoteStatus",
+        "title": "Vyntra: Show Remote Ollama Status"
+      },
+      {
+        "command": "localNest.configureRemote",
+        "title": "Vyntra: Configure Remote Ollama Host"
+      },
+      {
+        "command": "localNest.openAgent",
+        "title": "Vyntra: Open Agent"
+      },
+      {
+        "command": "localNest.newConversation",
+        "title": "Vyntra: New Conversation"
       }
     ],
     "configuration": {
@@ -64,21 +157,19 @@
         },
         "localNest.model": {
           "default": "qwen2.5-coder:7b",
-          "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) — the chat panel lists the models actually pulled on your host and lets you switch.",
+          "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) \u2014 the chat panel lists the models actually pulled on your host and lets you switch.",
           "type": "string"
         },
         "localNest.ollamaHost": {
           "default": "http://localhost:11434",
-          "description": "Ollama base URL. Keep localhost for fully local use, or point it at your own remote Ollama host. This extension sends code only to this host, and has no GPU/CUDA settings — Ollama manages hardware itself and runs on CPU by default.",
+          "description": "Ollama base URL. Keep localhost for fully local use, or point it at your own remote Ollama host. This extension sends code only to this host, and has no GPU/CUDA settings \u2014 Ollama manages hardware itself and runs on CPU by default.",
           "type": "string"
         },
         "localNest.provider": {
           "default": "ollama",
-          "description": "Model provider: Ollama (local, private), Gemini (Google API, gemini-3.8-flash), or OpenAI-compatible (LM Studio, OpenRouter, Groq, any /v1 API).",
+          "description": "Model provider: free local Ollama only \u2014 no Gemini, no API key.",
           "enum": [
-            "ollama",
-            "gemini",
-            "openai"
+            "ollama"
           ],
           "type": "string"
         },
@@ -89,7 +180,7 @@
         },
         "localNest.geminiApiKey": {
           "default": "",
-          "description": "Optional fallback for the Gemini API key. Prefer the secure command “Vyntra: Set Gemini API Key”, which stores it in Secret Storage instead of settings.",
+          "description": "Optional fallback for the Gemini API key. Prefer the secure command \u201cVyntra: Set Gemini API Key\u201d, which stores it in Secret Storage instead of settings.",
           "type": "string"
         },
         "localNest.lowBandwidth": {
@@ -121,6 +212,110 @@
           "default": "",
           "description": "Optional fallback for the OpenAI-compatible API key. Prefer the secure command Vyntra: Set OpenAI-compatible API Key, which stores it in Secret Storage instead of settings.",
           "type": "string"
+        },
+        "localNest.agentMaxRounds": {
+          "default": 5,
+          "description": "Agent verify-and-fix step ceiling (the agentic loop). 5 by default; set higher for long tasks, lower for quick ones.",
+          "type": "number"
+        },
+        "localNest.agentMaxGeneratedTokens": {
+          "default": 0,
+          "description": "Max generated tokens per model reply. 0 uses 4096 in low-bandwidth mode, otherwise 8192.",
+          "type": "number"
+        },
+        "localNest.agentTaskTimeoutMs": {
+          "default": 0,
+          "description": "Agent task elapsed-time budget in milliseconds. 0 = no timeout.",
+          "type": "number"
+        },
+        "localNest.agentMaxFileBytes": {
+          "default": 8388608,
+          "description": "Maximum bytes for a single file the agent may write (8 MiB ceiling). Larger proposed files are refused, not truncated.",
+          "type": "number"
+        },
+        "localNest.historyCharacters": {
+          "default": 40000,
+          "description": "Conversation history character budget before old messages are moved to older-chat retrieval.",
+          "type": "number"
+        },
+        "localNest.chatMemory.enabled": {
+          "default": true,
+          "description": "Keep conversation history and retrieve relevant older messages for a new turn (lexical match; raw tool results are excluded).",
+          "type": "boolean"
+        },
+        "localNest.chatMemory.resultCount": {
+          "default": 4,
+          "description": "Maximum older-chat messages retrieved for a new turn.",
+          "type": "number"
+        },
+        "localNest.chatMemory.retrievedCharacters": {
+          "default": 3000,
+          "description": "Maximum characters per retrieved older-chat message.",
+          "type": "number"
+        },
+        "localNest.chatMemory.scope": {
+          "default": "current",
+          "description": "Chat memory scope: 'current' keeps memory per workspace, 'all' shares it across workspaces in this editor.",
+          "enum": [
+            "current",
+            "all"
+          ],
+          "type": "string"
+        },
+        "localNest.contextMaxFileBytes": {
+          "default": 262144,
+          "description": "Maximum bytes per indexed workspace text file. Larger files are skipped.",
+          "type": "number"
+        },
+        "localNest.contextMaxIndexCharacters": {
+          "default": 8000000,
+          "description": "Total retained source-text character limit for workspace indexing.",
+          "type": "number"
+        },
+        "localNest.contextMaxIndexedFiles": {
+          "default": 2000,
+          "description": "Maximum eligible text files retained in the workspace index.",
+          "type": "number"
+        },
+        "localNest.ollamaContextWindow": {
+          "default": 0,
+          "description": "Ollama num_ctx. 0 leaves it to Ollama/model default; set explicitly only after checking RAM/VRAM.",
+          "type": "number"
+        },
+        "localNest.ollamaMaxOutputTokens": {
+          "default": -1,
+          "description": "Ollama num_predict. -1 leaves generation uncapped by this extension (model context and hardware still apply).",
+          "type": "number"
+        },
+        "localNest.ollamaAgentThinking": {
+          "default": false,
+          "description": "Request internal reasoning from thinking-capable Ollama models. Reasoning is not displayed as chat.",
+          "type": "boolean"
+        },
+        "localNest.ollamaAutoStart": {
+          "default": false,
+          "description": "If on, try to start an already-installed local Ollama server when it is offline. Never downloads software or models, never starts a remote service.",
+          "type": "boolean"
+        },
+        "localNest.openAICompatibleUrls": {
+          "default": "http://127.0.0.1:1234/v1,http://127.0.0.1:8080/v1,http://127.0.0.1:8000/v1",
+          "description": "Comma-separated OpenAI-compatible API base URLs. The first reachable one is used for the OpenAI-compatible provider. No credentials in this list.",
+          "type": "string"
+        },
+        "localNest.routing.agentModel": {
+          "default": "",
+          "description": "Preferred model id for Agent/Build tasks. Leave blank to use the provider's default model.",
+          "type": "string"
+        },
+        "localNest.routing.chatModel": {
+          "default": "",
+          "description": "Preferred model id for Ask/Plan chat. Leave blank to use the provider's default model.",
+          "type": "string"
+        },
+        "localNest.routing.editModel": {
+          "default": "",
+          "description": "Preferred model id for edit/fix selection tasks. Leave blank to use the provider's default model.",
+          "type": "string"
         }
       },
       "title": "Vyntra"
@@ -131,6 +326,16 @@
           "command": "localNest.explainSelection",
           "group": "localNest@1",
           "when": "editorHasSelection"
+        },
+        {
+          "command": "localNest.editSelection",
+          "group": "localNest@1",
+          "when": "editorHasSelection"
+        },
+        {
+          "command": "localNest.fixSelection",
+          "group": "localNest@1",
+          "when": "editorHasSelection"
         }
       ]
     },
@@ -139,6 +344,11 @@
         {
           "id": "localNest.chat",
           "name": "Vyntra Chat",
+          "type": "webview"
+        },
+        {
+          "id": "localNest.models",
+          "name": "Models",
           "type": "webview"
         }
       ]
@@ -151,9 +361,18 @@
           "title": "Vyntra"
         }
       ]
-    }
+    },
+    "chatParticipants": [
+      {
+        "id": "localNest",
+        "name": "LocalNest",
+        "fullName": "LocalNest",
+        "description": "Ask LocalNest in chat with @localnest \u2014 same free Ollama agent as the LocalNest sidebar, with workspace context first.",
+        "isSticky": true
+      }
+    ]
   },
-  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity: multi-turn chat with history, Stop generation, retry on rate limits, temperature control, diff edits, Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits — local Ollama, Gemini 3.8 Flash, or any OpenAI-compatible model, no separate IDE, no GPU settings.",
+  "description": "AI coding agent for Antigravity that works in your editor sidebar: multi-turn chat with history, Stop generation, retry on rate limits, temperature control, diff edits, Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 free local Ollama models only, no API key, no separate IDE, no GPU settings.",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
@@ -171,8 +390,7 @@
     "ai",
     "agent",
     "privacy",
-    "local-first",
-    "plug-and-play"
+    "local-first"
   ],
   "license": "MIT",
   "main": "./out/extension.js",
@@ -184,7 +402,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.0",
+  "version": "0.9.11",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
