@@ -1,6 +1,6 @@
 # LocalNest for Antigravity
 
-![LocalNest logo](media/logo.svg)
+![LocalNest logo](media/icon.png)
 
 LocalNest is a local-first AI coding agent that lives in the sidebar of your editor. You talk to it, it understands your project, and it changes code only after you review and approve it.
 
