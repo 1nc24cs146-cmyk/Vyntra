@@ -343,7 +343,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   const contextPrompt = contextToPrompt(ctx.files);
   const lang = detectLanguage(text);
   const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." : "";
-  // TuxNest step 1, made visible: inspect the workspace, context before code.
+  // Step 1, made visible: inspect the workspace, context before code.
   view?.webview.postMessage({
     text: "Step 1 — Inspect workspace (context before code): " + ctx.summary + (ctx.files.length ? "\nTop files used as context: " + ctx.files.map((f) => f.path).join(", ") : "\nNo workspace files matched — answering from the model alone."),
     type: "assistant"
@@ -474,7 +474,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   } else {
     view?.webview.postMessage({ type: "streamDone" });
     if (mode === "plan") {
-      // Plan never writes. Offer the TuxNest next step explicitly:
+      // Plan never writes. Offer the next step explicitly:
       // "Build this plan" carries this exact plan into Agent mode.
       view?.webview.postMessage({ text: full, type: "planReady" });
     }
@@ -867,7 +867,7 @@ class LocalNestViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "viewProposalFile") {
         // Review before approve: open the proposed content in a side
         // editor tab (untitled, so nothing is written to disk) next to
-        // the original file, if one exists. This is the TuxNest-style
+        // the original file, if one exists. This is the reviewable-change
         // "review edits" step — approve only after reading it.
         if (!currentProposal) {
           view?.webview.postMessage({ text: "No proposal is waiting.", type: "assistant" });
@@ -893,7 +893,7 @@ class LocalNestViewProvider implements vscode.WebviewViewProvider {
         }
         lastAppliedFiles = currentProposal.files.map((f) => f.path);
         view?.webview.postMessage({ text: results.join("\n"), type: "assistant" });
-        // TuxNest step 4, visible: validation AFTER accepted edits.
+        // Step 4, visible: validation AFTER accepted edits.
         // Approve-all is the explicit approval; only then does validation
         // run, and any fix it proposes goes through review again.
         if (agenticLoopEnabled && agentState && (agentState.mode === "agent" || agentState.mode === "build")) {
@@ -939,7 +939,7 @@ class LocalNestViewProvider implements vscode.WebviewViewProvider {
       "#chat{margin-top:12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:8px;padding:9px;margin:8px 0} .msg.user{background:var(--vscode-editor-background)} .msg.ai{background:var(--vscode-sideBar-background)}",
       "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin-top:12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
       "</style></head><body>",
-      "<h3>LocalNest</h3><p>Local-first, plug-and-play AI coding agent for VS Code / Antigravity — like TuxNest. No separate IDE, no GPU configuration. Plan changes, review every edit before it is written, then verify it. Install, pick a model, ask.</p>",
+      "<h3>LocalNest</h3><p>Local-first, plug-and-play AI coding agent for VS Code / Antigravity. No separate IDE, no GPU configuration. Plan changes, review every edit before it is written, then verify it. Install, pick a model, ask.</p>",
       "<div id='status'><span><b id='dot'>○</b> <span id='host'>checking…</span></span><button class='small' id='refresh'>Refresh</button></div>",
       "<p style='font-size:12px'>Setup — pick one, no other setup needed: <b>Local (private):</b> install Ollama, run <code>ollama serve</code> + <code>ollama pull qwen2.5-coder:7b</code> (any Ollama model works, or point Ollama Host at your own remote Ollama host). <b>Cloud:</b> press Set Gemini API Key. <b>No model yet:</b> Ask still searches this workspace and Build still creates working templates offline.</p>",
       "<p style='font-size:12px'>Local-first: with Ollama, your code never leaves this machine. With Gemini, code goes only to the Google API you chose — LocalNest has no telemetry and makes no other network calls. No GPU/CUDA settings exist in this extension; Ollama manages hardware itself and runs on CPU by default.</p>",
@@ -951,7 +951,7 @@ class LocalNestViewProvider implements vscode.WebviewViewProvider {
       "<label style='display:block;margin-top:8px'><input type='checkbox' id='fullAccess' style='width:auto'> Full desktop access — allow files &amp; commands outside this folder (Desktop, Home, custom paths)</label>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button></div>",
       "<textarea id='input' placeholder='Ask anything, or in Build mode: create a todo website, a weather app, a portfolio…'></textarea>",
-      "<label style='display:block;margin-top:8px'><input type='checkbox' id='autoApply' style='width:auto'> Auto-create without review — skips per-file approval (not the default TuxNest workflow; you can still Undo)</label>",
+      "<label style='display:block;margin-top:8px'><input type='checkbox' id='autoApply' style='width:auto'> Auto-create without review — skips per-file approval (not the default workflow; you can still Undo)</label>",
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='majorProject' style='width:auto'> Major project (multi-file, built in batches — also auto-detected for shop, blog, dashboard, full-stack, etc.)</label>",
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='agenticLoop' style='width:auto' checked> Agentic loop — keep working until done (max 5 steps, verify + fix)</label>",
       "<label style='display:block;margin-top:4px'><input type='checkbox' id='lowBandwidth' style='width:auto'> Low-bandwidth / slow network — smaller context, smaller replies</label>",

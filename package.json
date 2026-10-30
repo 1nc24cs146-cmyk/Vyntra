@@ -122,7 +122,7 @@
       ]
     }
   },
-  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity, working exactly like TuxNest: Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 local Ollama or your own remote Ollama host, no separate IDE, no GPU settings.",
+  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity: Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 local Ollama or your own remote Ollama host, no separate IDE, no GPU settings.",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
@@ -141,8 +141,7 @@
     "agent",
     "privacy",
     "local-first",
-    "plug-and-play",
-    "tuxnest-like"
+    "plug-and-play"
   ],
   "license": "MIT",
   "main": "./out/extension.js",
@@ -154,10 +153,11 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.1",
+  "version": "0.8.2",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
   },
-  "icon": "media/icon.png"
+  "icon": "media/icon.png",
+  "author": "Nitinkumar Hiremath"
 }
