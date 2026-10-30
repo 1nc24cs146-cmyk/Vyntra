@@ -154,9 +154,10 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.8.0",
+  "version": "0.8.1",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
-  }
+  },
+  "icon": "media/icon.png"
 }

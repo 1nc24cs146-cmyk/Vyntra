@@ -1,5 +1,9 @@
 # LocalNest for Antigravity
 
+![LocalNest logo](media/icon.png)
+
+*New, original logo (2026-10-30): a teal circuit-woven nest cradling a glowing amber code bracket, on deep navy. Created fresh for LocalNest — not taken from any existing extension logo, and not TuxNest's logo.*
+
 An original, local-first AI engineering extension inspired by the TuxNest
 workflow — built for Google Antigravity (a VS Code fork). It is not TuxNest,
 and it does not copy TuxNest code.

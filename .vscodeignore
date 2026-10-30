@@ -8,3 +8,5 @@ vsc-extension-quickstart.md
 **/.eslintrc.json
 **/*.map
 **/*.ts
+media/media-generation-*
+media/icon-128.png
