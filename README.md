@@ -272,6 +272,12 @@ npm run package   # produces localnest-antigravity-0.8.0.vsix
 3. Optionally publish the same package to the VS Code Marketplace with
    `vsce publish` for plain VS Code users.
 
+## License
+
+LocalNest is released under the **MIT License** — see the [LICENSE](LICENSE) file in this repo.
+
+That means anyone can use, copy, modify, merge, publish, distribute, sublicense, and sell it, free of charge, as long as the copyright and permission notices are kept in copies. The software is provided “as is”, without warranty.
+
 ## Limits of v0.8
 
 - No embeddings / vector RAG yet — context matching is keyword scoring
