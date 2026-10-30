@@ -1,0 +1,162 @@
+{
+  "activationEvents": [
+    "onView:localNest.chat",
+    "onCommand:localNest.openChat",
+    "onCommand:localNest.explainSelection",
+    "onCommand:localNest.undoLastApply",
+    "onCommand:localNest.refreshOllama",
+    "onCommand:localNest.openDesktopFolder",
+    "onCommand:localNest.listDesktop",
+    "onCommand:localNest.setGeminiApiKey"
+  ],
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "localNest.openChat",
+        "title": "LocalNest: Open Chat"
+      },
+      {
+        "command": "localNest.explainSelection",
+        "title": "LocalNest: Explain Selection"
+      },
+      {
+        "command": "localNest.undoLastApply",
+        "title": "LocalNest: Undo Last Approved Changes"
+      },
+      {
+        "command": "localNest.refreshOllama",
+        "title": "LocalNest: Refresh Ollama Models"
+      },
+      {
+        "command": "localNest.openDesktopFolder",
+        "title": "LocalNest: Open Desktop Folder"
+      },
+      {
+        "command": "localNest.listDesktop",
+        "title": "LocalNest: List Desktop Files"
+      },
+      {
+        "command": "localNest.setGeminiApiKey",
+        "title": "LocalNest: Set Gemini API Key"
+      }
+    ],
+    "configuration": {
+      "properties": {
+        "localNest.maxContextFiles": {
+          "default": 8,
+          "description": "How many workspace files to include as context for a question (top matches by name/content).",
+          "type": "number"
+        },
+        "localNest.model": {
+          "default": "qwen2.5-coder:7b",
+          "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) \u2014 the chat panel lists the models actually pulled on your host and lets you switch.",
+          "type": "string"
+        },
+        "localNest.ollamaHost": {
+          "default": "http://localhost:11434",
+          "description": "Ollama base URL. Keep localhost for fully local use, or point it at your own remote Ollama host. This extension sends code only to this host, and has no GPU/CUDA settings \u2014 Ollama manages hardware itself and runs on CPU by default.",
+          "type": "string"
+        },
+        "localNest.provider": {
+          "default": "ollama",
+          "description": "Model provider: Ollama (local, private) or Gemini (Google API, gemini-3.8-flash).",
+          "enum": [
+            "ollama",
+            "gemini"
+          ],
+          "type": "string"
+        },
+        "localNest.geminiModel": {
+          "default": "gemini-3.8-flash",
+          "description": "Gemini model ID. gemini-3.8-flash and gemini-2.5-flash are listed by default; any other Gemini model ID set here is also passed straight to the Gemini API.",
+          "type": "string"
+        },
+        "localNest.geminiApiKey": {
+          "default": "",
+          "description": "Optional fallback for the Gemini API key. Prefer the secure command \u201cLocalNest: Set Gemini API Key\u201d, which stores it in Secret Storage instead of settings.",
+          "type": "string"
+        },
+        "localNest.lowBandwidth": {
+          "default": false,
+          "description": "Low-bandwidth / slow network: smaller workspace context and smaller model replies.",
+          "type": "boolean"
+        },
+        "localNest.autoFallback": {
+          "default": true,
+          "description": "If the selected provider is unreachable on this network, automatically try the other provider (Gemini <-> Ollama) before giving up.",
+          "type": "boolean"
+        }
+      },
+      "title": "LocalNest"
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "localNest.explainSelection",
+          "group": "localNest@1",
+          "when": "editorHasSelection"
+        }
+      ]
+    },
+    "views": {
+      "localNest": [
+        {
+          "id": "localNest.chat",
+          "name": "LocalNest Chat",
+          "type": "webview"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "icon": "media/nest.svg",
+          "id": "localNest",
+          "title": "LocalNest"
+        }
+      ]
+    }
+  },
+  "description": "Local-first, plug-and-play AI coding agent for VS Code/Antigravity, working exactly like TuxNest: Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 local Ollama or your own remote Ollama host, no separate IDE, no GPU settings.",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.26.0",
+    "typescript": "^5.4.0"
+  },
+  "displayName": "LocalNest for Antigravity",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "keywords": [
+    "antigravity",
+    "ollama",
+    "local",
+    "ai",
+    "agent",
+    "privacy",
+    "local-first",
+    "plug-and-play",
+    "tuxnest-like"
+  ],
+  "license": "MIT",
+  "main": "./out/extension.js",
+  "name": "localnest-antigravity",
+  "publisher": "localnest",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile",
+    "watch": "tsc -watch -p ./"
+  },
+  "version": "0.8.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
+  }
+}
