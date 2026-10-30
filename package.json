@@ -18,31 +18,31 @@
     "commands": [
       {
         "command": "localNest.openChat",
-        "title": "LocalNest: Open Chat"
+        "title": "Vyntra: Open Chat"
       },
       {
         "command": "localNest.explainSelection",
-        "title": "LocalNest: Explain Selection"
+        "title": "Vyntra: Explain Selection"
       },
       {
         "command": "localNest.undoLastApply",
-        "title": "LocalNest: Undo Last Approved Changes"
+        "title": "Vyntra: Undo Last Approved Changes"
       },
       {
         "command": "localNest.refreshOllama",
-        "title": "LocalNest: Refresh Ollama Models"
+        "title": "Vyntra: Refresh Ollama Models"
       },
       {
         "command": "localNest.openDesktopFolder",
-        "title": "LocalNest: Open Desktop Folder"
+        "title": "Vyntra: Open Desktop Folder"
       },
       {
         "command": "localNest.listDesktop",
-        "title": "LocalNest: List Desktop Files"
+        "title": "Vyntra: List Desktop Files"
       },
       {
         "command": "localNest.setGeminiApiKey",
-        "title": "LocalNest: Set Gemini API Key"
+        "title": "Vyntra: Set Gemini API Key"
       }
     ],
     "configuration": {
@@ -78,7 +78,7 @@
         },
         "localNest.geminiApiKey": {
           "default": "",
-          "description": "Optional fallback for the Gemini API key. Prefer the secure command \u201cLocalNest: Set Gemini API Key\u201d, which stores it in Secret Storage instead of settings.",
+          "description": "Optional fallback for the Gemini API key. Prefer the secure command \u201cVyntra: Set Gemini API Key\u201d, which stores it in Secret Storage instead of settings.",
           "type": "string"
         },
         "localNest.lowBandwidth": {
@@ -92,7 +92,7 @@
           "type": "boolean"
         }
       },
-      "title": "LocalNest"
+      "title": "Vyntra"
     },
     "menus": {
       "editor/context": [
@@ -107,7 +107,7 @@
       "localNest": [
         {
           "id": "localNest.chat",
-          "name": "LocalNest Chat",
+          "name": "Vyntra Chat",
           "type": "webview"
         }
       ]
@@ -117,7 +117,7 @@
         {
           "icon": "media/nest.svg",
           "id": "localNest",
-          "title": "LocalNest"
+          "title": "Vyntra"
         }
       ]
     }
@@ -129,7 +129,7 @@
     "@vscode/vsce": "^2.26.0",
     "typescript": "^5.4.0"
   },
-  "displayName": "LocalNest for Antigravity",
+  "displayName": "Vyntra",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -145,8 +145,8 @@
   ],
   "license": "MIT",
   "main": "./out/extension.js",
-  "name": "localnest-antigravity",
-  "publisher": "localnest",
+  "name": "vyntra",
+  "publisher": "nitinkumarhiremath",
   "scripts": {
     "compile": "tsc -p ./",
     "package": "vsce package",
@@ -159,5 +159,5 @@
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
   },
   "icon": "media/icon.png",
-  "author": "Nitinkumar Hiremath"
+  "author": "NitinKumar Hiremath"
 }

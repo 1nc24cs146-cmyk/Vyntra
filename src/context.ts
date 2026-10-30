@@ -21,7 +21,7 @@ const SKIP_DIRS = new Set([
 export async function collectContext(query: string, maxFiles: number, lowBandwidth = false): Promise<{ files: ContextFile[]; summary: string }> {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
-    return { files: [], summary: "No folder is open. Open a project folder first so LocalNest can read its files." };
+    return { files: [], summary: "No folder is open. Open a project folder first so Vyntra can read its files." };
   }
   const root = folders[0].uri;
   const all = await vscode.workspace.findFiles(

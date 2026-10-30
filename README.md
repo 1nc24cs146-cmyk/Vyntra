@@ -1,13 +1,13 @@
-# LocalNest for Antigravity
+# Vyntra for Antigravity
 
-![LocalNest logo](media/icon.png)
+![Vyntra logo](media/icon.png)
 
-LocalNest is a local-first AI coding agent that lives in the sidebar of your editor. You talk to it, it understands your project, and it changes code only after you review and approve it.
+Vyntra is a local-first AI coding agent that lives in the sidebar of your editor. You talk to it, it understands your project, and it changes code only after you review and approve it.
 
 ## How it works
 
 **1. You open a project and ask a question.**
-Type a question or a task in the LocalNest panel. You can pick a mode first: Ask, Plan, Agent, or Build.
+Type a question or a task in the Vyntra panel. You can pick a mode first: Ask, Plan, Agent, or Build.
 
 **2. It inspects your workspace first.**
 Before it answers, it looks through your project files and picks the ones that match your question. That context is sent to the model along with your question, so the answer is about your code, not generic code.

@@ -42,11 +42,11 @@ export function activate(context: vscode.ExtensionContext) {
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "localNest.refreshOllama";
   statusBar.text = "○ Ollama: checking…";
-  statusBar.tooltip = "LocalNest — click to refresh Ollama status";
+  statusBar.tooltip = "Vyntra — click to refresh Ollama status";
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  const provider = new LocalNestViewProvider(context);
+  const provider = new VyntraViewProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("localNest.chat", provider, {
       webviewOptions: { retainContextWhenHidden: true }
@@ -60,7 +60,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.registerCommand("localNest.explainSelection", async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor || editor.selection.isEmpty) {
-        vscode.window.showWarningMessage("LocalNest: select some code first, then ask for an explanation.");
+        vscode.window.showWarningMessage("Vyntra: select some code first, then ask for an explanation.");
         return;
       }
       const code = editor.document.getText(editor.selection);
@@ -92,13 +92,13 @@ export function activate(context: vscode.ExtensionContext) {
       const key = await vscode.window.showInputBox({
         password: true,
         placeHolder: "Paste your Gemini API key from Google AI Studio",
-        prompt: "LocalNest stores this in VS Code Secret Storage, not in settings or files. Get a key at https://aistudio.google.com/app/apikey"
+        prompt: "Vyntra stores this in VS Code Secret Storage, not in settings or files. Get a key at https://aistudio.google.com/app/apikey"
       });
       if (!key) {
         return;
       }
       await secretStorage?.store("localNest.geminiApiKey", key.trim());
-      vscode.window.showInformationMessage("LocalNest: Gemini API key saved securely. Select Provider: Gemini in the panel to use gemini-3.8-flash.");
+      vscode.window.showInformationMessage("Vyntra: Gemini API key saved securely. Select Provider: Gemini in the panel to use gemini-3.8-flash.");
       await refreshStatus(false);
     })
   );
@@ -163,7 +163,7 @@ async function* providerStream(cfg: Config, messages: { content: string; role: "
   if (cfg.provider === "gemini") {
     const key = await getGeminiKey();
     if (!key) {
-      throw new Error("No Gemini API key set. Run “LocalNest: Set Gemini API Key” from the Command Palette, or pick Ollama as the provider.");
+      throw new Error("No Gemini API key set. Run “Vyntra: Set Gemini API Key” from the Command Palette, or pick Ollama as the provider.");
     }
     yield* geminiChatStream(key, cfg.geminiModel, messages, cfg.lowBandwidth ? 4096 : 8192);
     return;
@@ -203,7 +203,7 @@ function applyTargetFromMessage(msg: any) {
 async function openTargetFolder() {
   const root = baseTargetUri();
   if (!root) {
-    vscode.window.showWarningMessage("LocalNest: no folder is open and no target is set.");
+    vscode.window.showWarningMessage("Vyntra: no folder is open and no target is set.");
     return;
   }
   await vscode.commands.executeCommand("vscode.openFolder", root);
@@ -237,32 +237,32 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
     }
     if (!key) {
       statusBar.text = "○ Gemini: no API key";
-      statusBar.tooltip = "LocalNest — run “LocalNest: Set Gemini API Key” to use gemini-3.8-flash.";
+      statusBar.tooltip = "Vyntra — run “Vyntra: Set Gemini API Key” to use gemini-3.8-flash.";
       view?.webview.postMessage({ host: "Gemini API", model: cfg.geminiModel, models, online: false, provider: "gemini", type: "status" });
       if (showToast) {
-        vscode.window.showWarningMessage("LocalNest: no Gemini API key set. Run “LocalNest: Set Gemini API Key”, or switch Provider back to Ollama.");
+        vscode.window.showWarningMessage("Vyntra: no Gemini API key set. Run “Vyntra: Set Gemini API Key”, or switch Provider back to Ollama.");
       }
       return { models, online: false };
     }
     const online = await checkGemini(key);
     statusBar.text = online ? "◉ GEMINI 3.8 FLASH" : "○ Gemini offline";
-    statusBar.tooltip = online ? "LocalNest — Gemini API online, model " + cfg.geminiModel : "LocalNest — Gemini API not reachable. Check your key.";
+    statusBar.tooltip = online ? "Vyntra — Gemini API online, model " + cfg.geminiModel : "Vyntra — Gemini API not reachable. Check your key.";
     view?.webview.postMessage({ host: "Gemini API", model: cfg.geminiModel, models, online, provider: "gemini", type: "status" });
     return { models, online };
   }
   try {
     const models = await listModels(cfg.host);
     statusBar.text = "◉ LOCAL OLLAMA";
-    statusBar.tooltip = "LocalNest — Ollama online at " + cfg.host + " (" + models.length + " models)";
+    statusBar.tooltip = "Vyntra — Ollama online at " + cfg.host + " (" + models.length + " models)";
     view?.webview.postMessage({ host: cfg.host, model: cfg.model, models, online: true, provider: "ollama", type: "status" });
     return { models, online: true };
   } catch {
     statusBar.text = "○ Ollama offline";
-    statusBar.tooltip = "LocalNest — Ollama not reachable at " + cfg.host + ". Start Ollama, then click to retry.";
+    statusBar.tooltip = "Vyntra — Ollama not reachable at " + cfg.host + ". Start Ollama, then click to retry.";
     view?.webview.postMessage({ host: cfg.host, model: cfg.model, models: [], online: false, provider: "ollama", type: "status" });
     if (showToast) {
       vscode.window.showWarningMessage(
-        "LocalNest: Ollama is not reachable at " + cfg.host + ". Start it with `ollama serve`, then pull a model (e.g. ollama pull qwen2.5-coder:7b)."
+        "Vyntra: Ollama is not reachable at " + cfg.host + ". Start it with `ollama serve`, then pull a model (e.g. ollama pull qwen2.5-coder:7b)."
       );
     }
     return { models: [], online: false };
@@ -271,7 +271,7 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
 
 function systemPrompt(mode: Mode): string {
   const universal =
-    "You are LocalNest, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
+    "You are Vyntra, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
     platformInfo();
   if (mode === "plan") {
     return [
@@ -373,8 +373,8 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
         : "No files matched that question.",
       "",
       cfg.provider === "gemini"
-        ? "To go live: run “LocalNest: Set Gemini API Key” (key from https://aistudio.google.com/app/apikey), select Provider: Gemini, model gemini-3.8-flash, then press Refresh."
-        : "To go live: `ollama serve` in a terminal, then `ollama pull qwen2.5-coder:7b` (or another code model), then press Refresh in this panel. You can also point LocalNest at a remote Ollama host in Settings, or switch Provider to Gemini for gemini-3.8-flash. No GPU setup is needed — Ollama runs on CPU by default.",
+        ? "To go live: run “Vyntra: Set Gemini API Key” (key from https://aistudio.google.com/app/apikey), select Provider: Gemini, model gemini-3.8-flash, then press Refresh."
+        : "To go live: `ollama serve` in a terminal, then `ollama pull qwen2.5-coder:7b` (or another code model), then press Refresh in this panel. You can also point Vyntra at a remote Ollama host in Settings, or switch Provider to Gemini for gemini-3.8-flash. No GPU setup is needed — Ollama runs on CPU by default.",
       "Tip: Build mode still works offline — it creates a working website/app from a built-in template."
     ].join("\n");
     view?.webview.postMessage({ text: offline, type: "assistant" });
@@ -444,7 +444,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       return;
     }
     view?.webview.postMessage({
-      text: "LocalNest could not reach the model: " + String(streamError?.message || streamError) + "\nCheck that " + (cfg.provider === "gemini" ? "your Gemini API key is set and gemini-3.8-flash is enabled for it" : "Ollama is running and the model `" + cfg.model + "` is pulled") + ". If you are offline, Build mode still works from templates.",
+      text: "Vyntra could not reach the model: " + String(streamError?.message || streamError) + "\nCheck that " + (cfg.provider === "gemini" ? "your Gemini API key is set and gemini-3.8-flash is enabled for it" : "Ollama is running and the model `" + cfg.model + "` is pulled") + ". If you are offline, Build mode still works from templates.",
       type: "assistant"
     });
     return;
@@ -681,7 +681,7 @@ async function applyFile(path: string): Promise<string> {
 
 async function undoLastApply(): Promise<void> {
   if (!lastSnapshot || lastSnapshot.size === 0) {
-    vscode.window.showInformationMessage("LocalNest: nothing to undo — no approved changes yet.");
+    vscode.window.showInformationMessage("Vyntra: nothing to undo — no approved changes yet.");
     view?.webview.postMessage({ text: "Nothing to undo yet.", type: "assistant" });
     return;
   }
@@ -708,7 +708,7 @@ async function undoLastApply(): Promise<void> {
   lastSnapshot = null;
   const msg =
     "Undid changes from " + lastSnapshotLabel + ". Restored: " + (restored.join(", ") || "none") + ". Deleted new files: " + (deleted.join(", ") || "none") + ".";
-  vscode.window.showInformationMessage("LocalNest: " + msg);
+  vscode.window.showInformationMessage("Vyntra: " + msg);
   view?.webview.postMessage({ text: msg, type: "assistant" });
 }
 
@@ -727,7 +727,7 @@ function runCommands(commands: string[], cwdUri?: vscode.Uri): Promise<string> {
     const destructive = commands.filter((c) => /rm\s+-rf\s+\//.test(c) || /\bmkfs\b/.test(c) || />\s*\/dev\/sd/.test(c) || /:\(\)\s*\{/.test(c) || /\bsudo\b/.test(c));
     const blocked = fullAccessEnabled ? destructive : commands.filter((c) => isDangerousCommand(c));
     if (blocked.length > 0) {
-      const blockedMsg = "Refused to run blocked command(s): " + blocked.join(", ") + ". LocalNest never runs disk formatting, rm -rf / or sudo — run those yourself in a terminal if you really mean them. Everything else for building (npm/pip install, git, build, test, start a server) is allowed" + (fullAccessEnabled ? " with full desktop access on." : ", and with full access on it runs in your chosen target folder.");
+      const blockedMsg = "Refused to run blocked command(s): " + blocked.join(", ") + ". Vyntra never runs disk formatting, rm -rf / or sudo — run those yourself in a terminal if you really mean them. Everything else for building (npm/pip install, git, build, test, start a server) is allowed" + (fullAccessEnabled ? " with full desktop access on." : ", and with full access on it runs in your chosen target folder.");
       view?.webview.postMessage({ text: blockedMsg, type: "assistant" });
       resolve(blockedMsg);
       return;
@@ -827,7 +827,7 @@ async function continueAgenticLoop() {
   }
 }
 
-class LocalNestViewProvider implements vscode.WebviewViewProvider {
+class VyntraViewProvider implements vscode.WebviewViewProvider {
   constructor(private readonly extContext: vscode.ExtensionContext) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView) {
@@ -939,10 +939,10 @@ class LocalNestViewProvider implements vscode.WebviewViewProvider {
       "#chat{margin-top:12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:8px;padding:9px;margin:8px 0} .msg.user{background:var(--vscode-editor-background)} .msg.ai{background:var(--vscode-sideBar-background)}",
       "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin-top:12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
       "</style></head><body>",
-      "<h3>LocalNest</h3><p>Local-first, plug-and-play AI coding agent for VS Code / Antigravity. No separate IDE, no GPU configuration. Plan changes, review every edit before it is written, then verify it. Install, pick a model, ask.</p>",
+      "<h3>Vyntra</h3><p>Local-first, plug-and-play AI coding agent for VS Code / Antigravity. No separate IDE, no GPU configuration. Plan changes, review every edit before it is written, then verify it. Install, pick a model, ask.</p>",
       "<div id='status'><span><b id='dot'>○</b> <span id='host'>checking…</span></span><button class='small' id='refresh'>Refresh</button></div>",
       "<p style='font-size:12px'>Setup — pick one, no other setup needed: <b>Local (private):</b> install Ollama, run <code>ollama serve</code> + <code>ollama pull qwen2.5-coder:7b</code> (any Ollama model works, or point Ollama Host at your own remote Ollama host). <b>Cloud:</b> press Set Gemini API Key. <b>No model yet:</b> Ask still searches this workspace and Build still creates working templates offline.</p>",
-      "<p style='font-size:12px'>Local-first: with Ollama, your code never leaves this machine. With Gemini, code goes only to the Google API you chose — LocalNest has no telemetry and makes no other network calls. No GPU/CUDA settings exist in this extension; Ollama manages hardware itself and runs on CPU by default.</p>",
+      "<p style='font-size:12px'>Local-first: with Ollama, your code never leaves this machine. With Gemini, code goes only to the Google API you chose — Vyntra has no telemetry and makes no other network calls. No GPU/CUDA settings exist in this extension; Ollama manages hardware itself and runs on CPU by default.</p>",
       "<label>Provider</label><select id='provider'><option value='ollama'>Ollama (local, private)</option><option value='gemini'>Gemini 3.8 Flash (Google API)</option></select>",
       "<button class='small' id='setGeminiKey'>Set Gemini API Key (secure)</button>",
       "<label>Model</label><select id='model'><option>qwen2.5-coder:7b</option></select>",

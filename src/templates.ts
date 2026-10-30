@@ -220,7 +220,7 @@ export function buildTemplateApp(prompt: string): TemplateApp {
   const body =
     '<div class="card"><h2>What this is</h2><p>' +
     esc(prompt) +
-    "</p><p>This starter page was generated from your request. Edit the text and sections in index.html to make it exactly what you had in mind, or ask LocalNest in Build mode to rebuild it with more detail.</p></div>" +
+    "</p><p>This starter page was generated from your request. Edit the text and sections in index.html to make it exactly what you had in mind, or ask Vyntra in Build mode to rebuild it with more detail.</p></div>" +
     '<div class="card"><h2>Features</h2><div class="grid"><div class="card"><h3>Fast</h3><p>No build step — open and it works.</p></div><div class="card"><h3>Responsive</h3><p>Looks right on phone and desktop.</p></div><div class="card"><h3>Yours to edit</h3><p>Plain HTML, CSS and JavaScript, no framework lock-in.</p></div></div></div>' +
     '<div class="card"><h2>Get started</h2><button onclick="showWelcome()">Say hello</button><p id="welcome"></p></div>';
   const script = "function showWelcome(){ document.getElementById('welcome').textContent = 'Hello! This page is live and ready to customise.'; }";

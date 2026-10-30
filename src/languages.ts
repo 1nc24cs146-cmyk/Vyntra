@@ -129,7 +129,7 @@ export function buildLanguageProject(prompt: string): { files: { content: string
   }
   const run = platformInfo().includes("win32") && lang.id === "python" ? "python main.py" : lang.runCommand;
   files.push({
-    content: "# " + title + " (" + lang.name + ")\n\nA runnable " + lang.name + " starter generated from your request, so you can start in this language even offline.\n\n## Run it\n\n```\n" + run + "\n```\n\n## Next step\n\nWith a model online (Gemini 3.8 Flash or Ollama), ask LocalNest in Build mode for the full app in " + lang.name + " and it will generate the complete logic, not just this starter.\n",
+    content: "# " + title + " (" + lang.name + ")\n\nA runnable " + lang.name + " starter generated from your request, so you can start in this language even offline.\n\n## Run it\n\n```\n" + run + "\n```\n\n## Next step\n\nWith a model online (Gemini 3.8 Flash or Ollama), ask Vyntra in Build mode for the full app in " + lang.name + " and it will generate the complete logic, not just this starter.\n",
     path: "README.md"
   });
   return { files, language: lang, title };
