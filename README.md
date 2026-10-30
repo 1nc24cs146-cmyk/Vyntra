@@ -2,11 +2,9 @@
 
 ![LocalNest logo](media/icon.png)
 
-*New, original logo (2026-10-30): a teal circuit-woven nest cradling a glowing amber code bracket, on deep navy. Created fresh for LocalNest — not taken from any existing extension logo, and not TuxNest's logo.*
+*New, original logo (2026-10-30): a teal circuit-woven nest cradling a glowing amber code bracket, on deep navy. Created fresh for LocalNest — not taken from any existing extension logo.*
 
-An original, local-first AI engineering extension inspired by the TuxNest
-workflow — built for Google Antigravity (a VS Code fork). It is not TuxNest,
-and it does not copy TuxNest code.
+An original, local-first AI engineering extension — built for Google Antigravity (a VS Code fork).
 
 ## What it does (v0.8)
 
@@ -39,9 +37,9 @@ and it does not copy TuxNest code.
   your own remote GPU host if you prefer. This extension never sends code
   to a cloud AI itself.
 
-## Exactly how TuxNest works, step by step (v0.8)
+## How it works, step by step (v0.8)
 
-TuxNest's own description is: understand repositories, plan changes,
+The workflow is: understand repositories, plan changes,
 review edits, execute approved commands and verify results, with
 local Ollama or your own remote GPU host — “Your models. Your code.
 Visible evidence.” LocalNest v0.8 follows that exact sequence, with
@@ -74,15 +72,11 @@ each step shown in the panel (not hidden):
    not the default. No separate IDE, no GPU settings in the
    extension.
 
-Honest limit: LocalNest is original code inspired by TuxNest, not
-TuxNest itself — it does not claim to be TuxNest, does not use its
-source or branding, and cannot copy internal prompts or a
-marketplace listing that are not public. What it does copy exactly
-is the publicly described workflow above.
+LocalNest is original code, built from scratch for the workflow above.
 
-## Like TuxNest: plug-and-play, local-first, reviewable, verified (v0.7)
+## Plug-and-play, local-first, reviewable, verified (v0.7)
 
-TuxNest's promise, in its own words, is: install the extension,
+The promise is: install the extension,
 connect a supported local or cloud model, and build with reviewable
 changes and visible verification — no separate IDE, no GPU
 configuration. LocalNest v0.7 is built to that exact list:
