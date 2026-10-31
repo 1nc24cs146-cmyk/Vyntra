@@ -1,4 +1,5 @@
 import { fetchWithRetry } from "./llm";
+import * as os from "os";
 export async function listModels(ollamaHost: string): Promise<string[]> {
   const res = await fetchWithTimeout(`${trim(ollamaHost)}/api/tags`, 3000);
   if (!res.ok) {
@@ -33,18 +34,20 @@ export async function* chatStream(
   contextWindow?: number,
   think?: boolean
 ): AsyncGenerator<string, void, unknown> {
-  const body: any = { messages, model, stream: true };
+  // Speed: keep the model loaded for 30 minutes so the 2nd, 3rd, … question
+  // does not pay the slow model-load cost again, and use all CPU threads.
+  // Default context is capped at 4096 (Ollama's model default is often
+  // 32768, which makes prefill on CPU very slow) unless the user set one.
+  const body: any = { keep_alive: "30m", messages, model, stream: true };
   if (typeof think === "boolean") { body.think = think; }
-  const options: any = {};
+  const options: any = { num_thread: Math.max(1, os.cpus().length) };
   if (maxTokens) {
     options.num_predict = maxTokens;
   }
   if (typeof temperature === "number") {
     options.temperature = temperature;
   }
-  if (contextWindow && contextWindow > 0) {
-    options.num_ctx = contextWindow;
-  }
+  options.num_ctx = contextWindow && contextWindow > 0 ? contextWindow : 4096;
   if (Object.keys(options).length > 0) {
     body.options = options;
   }

@@ -293,7 +293,7 @@
           "type": "boolean"
         },
         "localNest.ollamaAutoStart": {
-          "default": false,
+          "default": true,
           "description": "If on, try to start an already-installed local Ollama server when it is offline. Never downloads software or models, never starts a remote service.",
           "type": "boolean"
         },
@@ -402,7 +402,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.11",
+  "version": "0.9.19",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"

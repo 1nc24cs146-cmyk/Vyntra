@@ -148,18 +148,34 @@ export function activate(context: vscode.ExtensionContext) {
     }
   } catch { /* chat participants are optional; sidebar still works */ }
 
-  // First run after install: reveal the sidebar once, so a new user
-  // actually sees LocalNest instead of having to hunt for its icon.
-  // Only once — it never auto-opens again after that.
+  // First run after install: read the system, check Ollama and its models,
+  // and tell the user exactly what is missing before they type anything.
+  // Only the prompt is once — the panel itself re-checks on every open.
   try {
     const shown = context.globalState.get<boolean>("localNest.firstRunShown", false);
     if (!shown) {
       void context.globalState.update("localNest.firstRunShown", true);
-      setTimeout(() => {
+      setTimeout(async () => {
+        const res = await runSystemCheck();
         void vscode.commands.executeCommand("localNest.chat.focus");
-        void vscode.window.showInformationMessage("LocalNest is installed — ask in the LocalNest sidebar (nest icon in the activity bar), or @localnest in chat.", "Open LocalNest Chat").then((choice) => {
-          if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
-        });
+        if (!res.installed) {
+          void vscode.window.showInformationMessage("LocalNest: Ollama is NOT installed on this system, so LocalNest cannot answer yet. Install Ollama to continue.", "Install Ollama", "Open LocalNest Chat").then((choice) => {
+            if (choice === "Install Ollama") { void vscode.env.openExternal(vscode.Uri.parse("https://ollama.com/download")); }
+            else if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
+          });
+        } else if (!res.online) {
+          void vscode.window.showInformationMessage("LocalNest: Ollama is installed but not running yet. Start it with `ollama serve`, then reopen LocalNest Chat.", "Open LocalNest Chat").then((choice) => {
+            if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
+          });
+        } else if (!res.models.length) {
+          void vscode.window.showInformationMessage("LocalNest: Ollama is installed, but no Ollama model is downloaded yet. Pick a model in LocalNest Chat and press Download.", "Open LocalNest Chat").then((choice) => {
+            if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
+          });
+        } else {
+          void vscode.window.showInformationMessage("LocalNest: found " + res.models.length + " Ollama model(s) on this system (" + res.models.join(", ") + ") — chat is ready. Pick a model and ask.", "Open LocalNest Chat").then((choice) => {
+            if (choice === "Open LocalNest Chat") { void vscode.commands.executeCommand("localNest.chat.focus"); }
+          });
+        }
       }, 800);
     }
   } catch { /* first-run reveal is best-effort */ }
@@ -179,7 +195,7 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("localNest.openChat", async () => {
-      await vscode.commands.executeCommand("localNest.chat.focus");
+      await focusChatView();
     }),
     vscode.commands.registerCommand("localNest.explainSelection", async () => {
       const editor = vscode.window.activeTextEditor;
@@ -410,7 +426,7 @@ function getConfig(): Config {
     maxFiles: cfg.get<number>("maxContextFiles", 8),
     model: cfg.get<string>("model", "qwen2.5-coder:7b"),
     ollamaAgentThinking: cfg.get<boolean>("ollamaAgentThinking", false),
-    ollamaAutoStart: cfg.get<boolean>("ollamaAutoStart", false),
+    ollamaAutoStart: cfg.get<boolean>("ollamaAutoStart", true),
     ollamaContextWindow: cfg.get<number>("ollamaContextWindow", 0),
     ollamaMaxOutputTokens: cfg.get<number>("ollamaMaxOutputTokens", -1),
     openaiBaseUrl: cfg.get<string>("openaiBaseUrl", "http://localhost:1234/v1"),
@@ -452,6 +468,116 @@ async function tryAutoStartOllama(host: string): Promise<void> {
     child.unref();
     await new Promise((r) => setTimeout(r, 1500));
   } catch { /* already-installed Ollama could not be started; user starts it manually */ }
+}
+interface SystemCheck { installed: boolean; online: boolean; models: string[]; }
+let systemCheckResult: SystemCheck | null = null;
+async function checkOllamaBinary(): Promise<boolean> {
+  return new Promise((resolve) => {
+    const child = spawn("ollama", ["--version"], { shell: false });
+    let done = false;
+    const finish = (v: boolean) => { if (!done) { done = true; resolve(v); } };
+    child.on("error", () => finish(false));
+    child.on("close", (code) => finish(code === 0));
+    setTimeout(() => { try { child.kill(); } catch { /* noop */ } finish(false); }, 5000);
+  });
+}
+async function runSystemCheck(): Promise<SystemCheck> {
+  const cfg = getConfig();
+  const installed = await checkOllamaBinary();
+  if (!installed) { systemCheckResult = { installed: false, models: [], online: false }; return systemCheckResult; }
+  try {
+    const models = await listModels(cfg.host);
+    systemCheckResult = { installed: true, models, online: true };
+    return systemCheckResult;
+  } catch {
+    // Ollama is installed but the server is not running — try starting it once, then re-check.
+    await tryAutoStartOllama(cfg.host);
+    try {
+      const models = await listModels(cfg.host);
+      systemCheckResult = { installed: true, models, online: true };
+      return systemCheckResult;
+    } catch {
+      systemCheckResult = { installed: true, models: [], online: false };
+      return systemCheckResult;
+    }
+  }
+}
+function pullOllamaModel(model: string): void {
+  const terminal = vscode.window.createTerminal("Ollama pull " + model);
+  terminal.show();
+  if (process.platform === "win32") {
+    // PowerShell: check first, so a missing Ollama install gives a plain
+    // message instead of the confusing red CommandNotFoundException.
+    terminal.sendText(`if (Get-Command ollama -ErrorAction SilentlyContinue) { ollama pull ${model} } else { Write-Host 'Ollama is NOT installed. Install it from https://ollama.com/download, restart Antigravity, then try pulling again.' }`);
+  } else {
+    terminal.sendText("ollama pull " + model);
+  }
+}
+let downloadingModel = "";
+async function downloadOllamaModel(model: string): Promise<void> {
+  if (downloadingModel) {
+    view?.webview.postMessage({ text: "Already downloading " + downloadingModel + " — wait for it to finish, then press Continue to chat.", type: "setupStatus" });
+    return;
+  }
+  downloadingModel = model;
+  view?.webview.postMessage({ text: "Downloading " + model + "… this can take several minutes for a 7B model (about 4–5 GB). Do not close Antigravity.", type: "setupStatus" });
+  try {
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Downloading Ollama model " + model, cancellable: false }, async (progress) => {
+      await new Promise<void>((resolve, reject) => {
+        let lastPct = "";
+        let lastOut = "";
+        const child = spawn("ollama", ["pull", model], { shell: false });
+        const onData = (data: any) => {
+          const text = String(data);
+          lastOut = text.slice(-500);
+          const m = text.match(/(\d+)%/g);
+          if (m) {
+            const pct = m[m.length - 1];
+            if (pct !== lastPct) {
+              lastPct = pct;
+              progress.report({ message: model + " — " + pct });
+              view?.webview.postMessage({ text: "Downloading " + model + " — " + pct + " (keep this open, do not close Antigravity)", type: "setupStatus" });
+            }
+          }
+        };
+        child.stdout?.on("data", onData);
+        child.stderr?.on("data", onData);
+        child.on("error", (err: any) => {
+          if (err?.code === "ENOENT") {
+            reject(new Error("Ollama is not installed"));
+          } else {
+            reject(err);
+          }
+        });
+        child.on("close", (code) => {
+          if (code === 0) { resolve(); } else { reject(new Error("ollama pull exited with code " + code + ". " + lastOut)); }
+        });
+      });
+    });
+    downloadingModel = "";
+    view?.webview.postMessage({ text: "Downloaded " + model + " — opening chat now.", type: "setupStatus" });
+    await vscode.workspace.getConfiguration("localNest").update("model", model, vscode.ConfigurationTarget.Global);
+    await refreshStatus(false);
+    view?.webview.postMessage({ type: "showChat" });
+    vscode.window.showInformationMessage("LocalNest: downloaded " + model + " — chat is ready.");
+  } catch (err: any) {
+    downloadingModel = "";
+    const msg = String(err?.message || err);
+    if (msg.includes("not installed")) {
+      view?.webview.postMessage({ text: "Ollama is NOT installed on this machine, so nothing could download. Press Install Ollama, install it from ollama.com/download, restart Antigravity, then download again.", type: "setupStatus" });
+      vscode.window.showWarningMessage("LocalNest: Ollama is not installed. Install it from https://ollama.com/download, restart Antigravity, then download a model.");
+    } else {
+      view?.webview.postMessage({ text: "Download failed for " + model + ": " + msg + "\nTrying the terminal instead — watch the terminal for the full error.", type: "setupStatus" });
+      pullOllamaModel(model);
+    }
+  }
+}
+async function focusChatView(): Promise<void> {
+  try {
+    await vscode.commands.executeCommand("workbench.view.extension.localNest");
+  } catch { /* container focus is best-effort */ }
+  await vscode.commands.executeCommand("localNest.chat.focus");
+  vscode.window.showInformationMessage("LocalNest Chat is in the left sidebar. If you still see only Models, click the sidebar title at the top and choose 'LocalNest Chat' (in the Vyntra build it is called 'Vyntra Chat').");
 }
 async function runDiagnose(includeSelfTest: boolean): Promise<void> {
   const cfg = getConfig();
@@ -553,7 +679,9 @@ async function* providerStream(cfg: Config, messages: LlmMessage[], modelOverrid
       yield* openAiChatStream({ apiKey: key, baseUrl: effectiveOpenAiUrl || cfg.openaiBaseUrl, maxTokens, model: modelOverride || cfg.openaiModel, temperature: cfg.temperature }, messages, signal);
       return;
     }
-    const maxTokens = cfg.ollamaMaxOutputTokens > 0 ? cfg.ollamaMaxOutputTokens : (cfg.ollamaMaxOutputTokens === -1 ? undefined : (cfg.agentMaxGeneratedTokens > 0 ? cfg.agentMaxGeneratedTokens : (cfg.lowBandwidth ? 4096 : undefined)));
+    // Speed: cap output at 4096 tokens by default instead of uncapped —
+    // uncapped generation keeps running long after the useful answer ends.
+    const maxTokens = cfg.ollamaMaxOutputTokens > 0 ? cfg.ollamaMaxOutputTokens : (cfg.agentMaxGeneratedTokens > 0 ? cfg.agentMaxGeneratedTokens : (cfg.lowBandwidth ? 2048 : 4096));
     yield* chatStream(cfg.host, modelOverride || cfg.model, messages, signal, maxTokens, cfg.temperature, cfg.ollamaContextWindow, cfg.ollamaAgentThinking);
   } finally {
     if (timer) { clearTimeout(timer); }
@@ -746,22 +874,46 @@ function systemPrompt(mode: Mode): string {
   ].join("\n");
 }
 
+// Only inspect the workspace when the user actually asks for it — a
+// mention of the project/files, an @ mention, a file path/extension, or
+// selected code in the editor. Otherwise the task is answered directly,
+// with no Step 1 and no workspace scan slowing it down.
+function needsWorkspaceContext(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/@(file|selection|terminal|diagnostics|git)\b/.test(lower)) { return true; }
+  if (/\b(project|workspace|folder|repository|repo|codebase|my code|this project|this file|this folder|look at|check (this|my|the)|in this project|in my project|in this file)\b/.test(lower)) { return true; }
+  if (/[A-Za-z0-9_\-\/]+\.(py|js|ts|tsx|jsx|html|css|json|md|go|rs|java|php|rb|c|cpp|h)\b/.test(text)) { return true; }
+  if (/\b[a-z0-9_\-]+\/[a-z0-9_\-\/]+/.test(text)) { return true; }
+  try {
+    const editor = vscode.window.activeTextEditor;
+    if (editor && !editor.selection.isEmpty) { return true; }
+  } catch { /* no editor */ }
+  return false;
+}
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
   const cfg = getConfig();
   if (!cfg.chatMemoryEnabled) { conversationHistory = []; }
   currentRequestRoot = buildTargetUri(text, mode);
   agentState = { autoApply, lastOutput: "", mode, step: 1, task: text };
   const online = await providerOnline(cfg);
-  const effectiveMaxFiles = cfg.lowBandwidth ? Math.max(3, Math.floor(cfg.maxFiles / 2)) : cfg.maxFiles;
-  const ctx = await collectContext(text, effectiveMaxFiles, cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles });
-  const contextPrompt = contextToPrompt(ctx.files);
+  const inspectWorkspace = needsWorkspaceContext(text);
+  // Speed: Ask questions use a small context (4 files, 30k budget via
+  // low-bandwidth mode) — a huge prompt is the main reason CPU answers
+  // feel slow. Agent/Build keep the full context.
+  const effectiveMaxFiles = mode === "ask" ? 4 : (cfg.lowBandwidth ? Math.max(3, Math.floor(cfg.maxFiles / 2)) : cfg.maxFiles);
+  const ctx = inspectWorkspace
+    ? await collectContext(text, effectiveMaxFiles, mode === "ask" || cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles })
+    : { files: [] as any[], summary: "No workspace inspection requested — answering the task directly, without scanning project files." };
+  const contextPrompt = inspectWorkspace ? contextToPrompt(ctx.files) : "No workspace files inspected. Answer from the question/task alone.";
   const lang = detectLanguage(text);
   const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." : "";
-  // Step 1, made visible: inspect the workspace, context before code.
-  view?.webview.postMessage({
-    text: "Step 1 — Inspect workspace (context before code): " + ctx.summary + (ctx.files.length ? "\nTop files used as context: " + ctx.files.map((f) => f.path).join(", ") : "\nNo workspace files matched — answering from the model alone."),
-    type: "assistant"
-  });
+  if (inspectWorkspace) {
+    // Step 1, made visible, only when the user asked for a project/file look:
+    view?.webview.postMessage({
+      text: "Step 1 — Inspect workspace (context before code): " + ctx.summary + (ctx.files.length ? "\nTop files used as context: " + ctx.files.map((f) => f.path).join(", ") : "\nNo workspace files matched — answering from the model alone."),
+      type: "assistant"
+    });
+  }
 
   if (!online) {
     if (mode === "build") {
@@ -834,6 +986,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   if (!streamError && full) {
     conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+    view?.webview.postMessage({ type: "streamDone" });
     view?.webview.postMessage({ text: "— " + secs + "s · ~" + estimateTokens(full) + " tokens in this reply (estimate, 1 token ≈ 4 chars) · history: " + conversationHistory.length + " message(s) kept", type: "assistant" });
   }
   if (streamError && String(streamError?.name || "") === "AbortError") {
@@ -1314,19 +1467,14 @@ class LocalNestModelsProvider implements vscode.WebviewViewProvider {
   resolveWebviewView(webviewView: vscode.WebviewView) {
     modelsView = webviewView;
     webviewView.webview.options = { enableScripts: true };
-    webviewView.webview.html = "<!DOCTYPE html><html><body style='font-family:var(--vscode-font-family);padding:12px'><h3>Models</h3><p style='color:var(--vscode-descriptionForeground)'>These are the models you pulled in Ollama on your desktop — tap one to use it in chat. The agent chat is in <b>LocalNest Chat</b> — open it below, pick <b>Agent</b>, and type your task there.</p><button id='openAgent' style='width:100%;padding:9px'>Open LocalNest Chat (Agent)</button><div id='list' style='margin-top:10px'>Loading models…</div><script>var vscode=acquireVsCodeApi();document.getElementById('openAgent').addEventListener('click',function(){vscode.postMessage({type:'openAgentChat'});});window.addEventListener('message',function(ev){var m=ev.data;if(m.type==='models'){var el=document.getElementById('list');el.innerHTML='';if(!m.models || !m.models.length){el.innerHTML='No free models installed yet. Start Ollama (ollama serve), then pull a free one in LocalNest Chat:<br>';['qwen2.5-coder:7b','llama3.2:3b','mistral:7b'].forEach(function(name){var b=document.createElement('button');b.textContent='Pull '+name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'pullModel',model:name});});el.appendChild(b);});return;}m.models.forEach(function(name){var b=document.createElement('button');b.textContent=name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'setModel',model:name});});el.appendChild(b);});}});</script></body></html>";
+    webviewView.webview.html = "<!DOCTYPE html><html><body style='font-family:var(--vscode-font-family);padding:12px'><h3>Models</h3><p style='color:var(--vscode-descriptionForeground)'>These are the models you pulled in Ollama on your desktop — tap one to use it in chat. The agent chat is in <b>LocalNest Chat</b> — open it below, pick <b>Agent</b>, and type your task there.</p><button id='openAgent' style='width:100%;padding:9px'>Open LocalNest Chat (Agent)</button><button id='installOllama' style='width:100%;padding:9px;margin-top:6px'>Install Ollama (if terminal says ollama is not recognized)</button><div id='list' style='margin-top:10px'>Loading models…</div><script>var vscode=acquireVsCodeApi();document.getElementById('openAgent').addEventListener('click',function(){vscode.postMessage({type:'openAgentChat'});});document.getElementById('installOllama').addEventListener('click',function(){vscode.postMessage({type:'installOllama'});});window.addEventListener('message',function(ev){var m=ev.data;if(m.type==='models'){var el=document.getElementById('list');el.innerHTML='';if(!m.models || !m.models.length){el.innerHTML='No free models installed yet. If the terminal says 'ollama is not recognized', Ollama is NOT installed — tap Install Ollama above first, install it, restart Antigravity, then pull a free model:<br>';['qwen2.5-coder:7b','llama3.2:3b','mistral:7b'].forEach(function(name){var b=document.createElement('button');b.textContent='Pull '+name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'pullModel',model:name});});el.appendChild(b);});return;}m.models.forEach(function(name){var b=document.createElement('button');b.textContent=name;b.style.cssText='display:block;width:100%;text-align:left;margin:4px 0;padding:8px';b.addEventListener('click',function(){vscode.postMessage({type:'setModel',model:name});});el.appendChild(b);});}});</script></body></html>";
     webviewView.webview.onDidReceiveMessage(async (msg: any) => {
       if (msg.type === "setModel") {
         await vscode.workspace.getConfiguration("localNest").update("model", String(msg.model), vscode.ConfigurationTarget.Global);
         await refreshStatus(false);
       } else if (msg.type === "downloadModel") {
         const model = String(msg.model || "").trim();
-        if (model) {
-          const terminal = vscode.window.createTerminal("Ollama pull " + model);
-          terminal.show();
-          terminal.sendText("ollama pull " + model);
-          view?.webview.postMessage({ text: "Downloading " + model + " in the terminal — wait for it to finish, then press Continue to chat.", type: "setupStatus" });
-        }
+        if (model) { await downloadOllamaModel(model); }
       } else if (msg.type === "continueToChat") {
         const model = String(msg.model || "").trim() || getConfig().model;
         await vscode.workspace.getConfiguration("localNest").update("model", model, vscode.ConfigurationTarget.Global);
@@ -1342,9 +1490,12 @@ class LocalNestModelsProvider implements vscode.WebviewViewProvider {
         }
       } else if (msg.type === "pullModel") {
         const model = String(msg.model || "").trim();
-        if (model) { const terminal = vscode.window.createTerminal("Ollama pull " + model); terminal.show(); terminal.sendText("ollama pull " + model); }
+        if (model) { await downloadOllamaModel(model); }
+      } else if (msg.type === "installOllama") {
+        await vscode.env.openExternal(vscode.Uri.parse("https://ollama.com/download"));
+        vscode.window.showInformationMessage("Ollama download opened in your browser. Install it, restart Antigravity, then pull a model.");
       } else if (msg.type === "openAgentChat") {
-        await vscode.commands.executeCommand("localNest.chat.focus");
+        await focusChatView();
         setTimeout(() => { view?.webview.postMessage({ mode: "agent", type: "setMode" }); }, 400);
       }
     });
@@ -1468,94 +1619,138 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         } catch (err: any) {
           view?.webview.postMessage({ text: "Test failed — model `" + testCfg.model + "` did not answer: " + String(err?.message || err) + "\nCheck: Ollama is running (ollama serve), the model is pulled (ollama list), and Model in this panel matches a pulled model.", type: "assistant" });
         }
+      } else if (msg.type === "downloadModel") {
+        const model = String(msg.model || "").trim();
+        if (model) { await downloadOllamaModel(model); }
+      } else if (msg.type === "continueToChat") {
+        const model = String(msg.model || "").trim() || getConfig().model;
+        await vscode.workspace.getConfiguration("localNest").update("model", model, vscode.ConfigurationTarget.Global);
+        try {
+          const installed = await listModels(getConfig().host);
+          if (installed.includes(model)) {
+            view?.webview.postMessage({ type: "showChat" });
+          } else {
+            view?.webview.postMessage({ text: "Model " + model + " is not downloaded yet — press Download selected model, wait for the terminal pull to finish, then press Continue to chat again.", type: "setupStatus" });
+          }
+        } catch {
+          view?.webview.postMessage({ text: "Ollama is not reachable at " + getConfig().host + " — install Ollama, start it with ollama serve, then try again.", type: "setupStatus" });
+        }
+      } else if (msg.type === "installOllama") {
+        await vscode.env.openExternal(vscode.Uri.parse("https://ollama.com/download"));
+        view?.webview.postMessage({ text: "Ollama download opened in your browser. Install it, restart Antigravity, then download a model.", type: "setupStatus" });
       } else if (msg.type === "pullModel") {
         const model = String(msg.model || "").trim();
-        if (model) {
-          const terminal = vscode.window.createTerminal("Ollama pull " + model);
-          terminal.show();
-          terminal.sendText("ollama pull " + model);
-          view?.webview.postMessage({ text: "Pulling free model " + model + " in the terminal — wait for it to finish, then press Refresh and pick it in Model.", type: "assistant" });
-        }
+        if (model) { await downloadOllamaModel(model); }
       } else if (msg.type === "setModel") {
         const cfg = vscode.workspace.getConfiguration("localNest");
         await cfg.update("model", String(msg.model), vscode.ConfigurationTarget.Global);
         view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "assistant" });
         view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "setupStatus" });
         await refreshStatus(false);
+        // If the user picked a model that is already on this system, open
+        // chat straight away — no extra Continue press needed.
+        try {
+          const installed = await listModels(getConfig().host);
+          if (installed.includes(String(msg.model))) { view?.webview.postMessage({ type: "showChat" }); }
+        } catch { /* stay on setup; refresh already showed the status */ }
       }
     });
-    void refreshStatus(false);
+    void (async () => {
+      const res = await runSystemCheck();
+      await refreshStatus(false);
+      if (res.models.length) {
+        view?.webview.postMessage({ type: "showChat" });
+      } else if (!res.installed) {
+        view?.webview.postMessage({ text: "System check: Ollama is NOT installed on this system, so LocalNest cannot answer yet. Press Install Ollama below, install it from ollama.com/download, restart Antigravity, then download a model.", type: "setupStatus" });
+      } else if (!res.online) {
+        view?.webview.postMessage({ text: "System check: Ollama is installed but not running. Start it with `ollama serve`, then press Refresh.", type: "setupStatus" });
+      } else {
+        view?.webview.postMessage({ text: "System check: Ollama is installed, but no model is downloaded yet. Pick a model below and press Download selected model, then chat will open.", type: "setupStatus" });
+      }
+    })();
   }
 
   private html(): string {
     return [
       "<!DOCTYPE html><html><head><meta charset='utf-8'>",
       "<style>",
-      "body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-sideBar-background);margin:0;padding:12px;font-size:13px}",
-      "h3{margin:0 0 4px} p{color:var(--vscode-descriptionForeground);line-height:1.45}",
-      "#status{border:1px solid var(--vscode-panel-border);border-radius:8px;padding:8px 10px;margin:8px 0;display:flex;gap:8px;align-items:center;justify-content:space-between}",
-      "#status b{white-space:nowrap} select,input,textarea{width:100%;box-sizing:border-box;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:6px;padding:8px}",
-      "textarea{min-height:90px;resize:vertical}",
-      ".modes{display:flex;gap:6px;margin:8px 0;flex-wrap:wrap} .modes button{flex:1;padding:7px 4px;border-radius:6px;border:1px solid var(--vscode-button-border);background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);cursor:pointer} .modes button.on{background:var(--vscode-button-background);color:var(--vscode-button-foreground)}",
-      "button.primary{width:100%;padding:9px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0;border-radius:6px;cursor:pointer;margin-top:8px}",
+      "body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-sideBar-background);margin:0;padding:0;font-size:13px;display:flex;flex-direction:column;height:100vh}",
+      ".topbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--vscode-panel-border)} .topbar .pill{background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);border-radius:12px;padding:3px 10px;font-weight:700} .topbar .spacer{flex:1} .topbar button{background:none;border:0;color:var(--vscode-foreground);cursor:pointer;font-size:14px}",
+      ".head{display:flex;align-items:center;gap:10px;padding:12px 12px 4px} .head .logo{font-size:22px} .head b{font-size:16px}",
+      ".autorow{display:flex;align-items:center;gap:8px;padding:6px 12px} .autorow .local{background:#0e7490;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}",
+      ".modes{display:flex;gap:4px;padding:6px 12px;flex-wrap:wrap} .modes button{flex:1;padding:7px 4px;border-radius:8px;border:0;background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer} .modes button.on{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);font-weight:700} #fastBtn{flex:0 0 auto;padding:7px 10px}",
+      ".intro{margin:8px 12px;padding:12px;border:1px solid var(--vscode-panel-border);border-radius:12px;background:var(--vscode-editor-background)} .intro b{display:block} .intro span{color:var(--vscode-descriptionForeground)}",
+      "#setup{margin:8px 12px;padding:12px;border:1px solid var(--vscode-panel-border);border-radius:12px} select,input,textarea{width:100%;box-sizing:border-box;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:8px;padding:8px}",
+      "button.primary{width:100%;padding:9px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0;border-radius:8px;cursor:pointer;margin-top:8px}",
       "button.small{padding:5px 8px;margin:4px 4px 0 0;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border:1px solid var(--vscode-button-border);border-radius:6px;cursor:pointer}",
-      "#chat{margin-top:12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:8px;padding:9px;margin:8px 0} .msg.user{background:var(--vscode-editor-background)} .msg.ai{background:var(--vscode-sideBar-background)}",
-      "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin-top:12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
+      "#chat{flex:1;overflow-y:auto;padding:4px 12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:12px;padding:10px;margin:8px 0;max-width:92%} .msg.user{margin-left:auto;background:#0e7490;color:#fff;border-color:#0e7490} .msg.ai{margin-right:auto} .msg.error{border-left:4px solid #ef4444} .msg.error b{color:#f87171}",
+      "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin:8px 12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
+      ".foot{display:flex;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:12px}",
+      ".chips{display:flex;gap:6px;flex-wrap:wrap;padding:4px 12px} .chips button{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);border:0;border-radius:12px;padding:4px 10px;cursor:pointer;font-size:12px}",
+      ".composer{padding:8px 12px 12px;border-top:1px solid var(--vscode-panel-border)} textarea{min-height:70px;resize:vertical} .sendrow{display:flex;justify-content:flex-end;margin-top:6px} .sendrow button{background:#0e7490;color:#fff;border:0;border-radius:8px;padding:8px 18px;cursor:pointer}",
       "</style></head><body>",
-      "<h3>Vyntra</h3><p>AI coding agent for Antigravity. First pick an Ollama model, download it, then chat.</p>",
-      "<div id='status'><span><b id='dot'>○</b> <span id='host'>checking…</span></span><button class='small' id='refresh'>Refresh</button></div>",
+      "<div class='topbar'><span>Chat</span><span class='pill'>Vyntra</span><span class='spacer'></span><button id='refresh' title='Refresh'>↻</button><button id='newChatTop' title='New chat'>+</button></div>",
+      "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
+      "<div class='autorow'><span>Auto</span><span class='local'>LOCAL</span><span>▾</span><span id='host' style='color:var(--vscode-descriptionForeground)'>checking…</span></div>",
+      "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button><button id='fastBtn' title='Fast mode: smaller context, faster answers'>Fast</button></div>",
+      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.</span></div>",
       "<div id='setup'>",
-      "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat. No other options are shown here.</p>",
+      "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat.</p><p style='font-size:12px;color:var(--vscode-descriptionForeground)'>Speed tip: on a normal laptop without a GPU, a 3B model (llama3.2:3b, phi3:mini) answers much faster than a 7B model. The first answer after a download is always slowest — the model has to load into memory first.</p>",
       "<label>Available Ollama models</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
       "<div id='setupStatus' style='margin-top:8px;color:var(--vscode-descriptionForeground)'></div>",
       "<button class='primary' id='downloadModel'>Download selected model</button>",
       "<button class='primary' id='continueChat'>Continue to chat →</button>",
+      "<button class='small' id='installOllama'>Install Ollama (if terminal says ollama is not recognized)</button>",
       "</div>",
-      "<div id='chatStage' style='display:none'>",
-      "<button class='small' id='changeModel'>← Change model</button>",
-      "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button></div>",
-      "<textarea id='input' placeholder='Ask anything — press Enter to send, Shift+Enter for a new line. In Build mode: create a todo website, a weather app, a portfolio…'></textarea>",
-      "<button class='primary' id='send'>Send to agent</button><div><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat (clear history)</button></div>",
-      "<button class='small' id='buildPlan' style='display:none'>Build this plan (Agent mode)</button>",
+      "<div id='chatStage' style='display:none;flex:1;flex-direction:column;min-height:0'>",
+      "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='undo'>Undo last apply</button></div>",
+      "<button class='small' id='buildPlan' style='display:none;margin:8px 12px'>Build this plan (Agent mode)</button>",
       "<div id='proposal'><b>Proposal — nothing written yet</b><div id='files'></div><div id='cmds'></div>",
       "<button class='primary' id='approveAll'>Approve all files</button>",
       "<button class='small' id='runCmds'>Run approved commands</button><button class='small' id='reject'>Discard proposal</button></div>",
       "<div id='chat'></div>",
       "</div>",
+      "<div class='foot'><span>⎇ Changes <span id='changesCount'>0</span> &nbsp; &gt;_ Terminal <span id='terminalCount'>0</span></span><span id='readyText'>Ready</span></div>",
+      "<div class='chips'><button data-chip='@file'>@file</button><button data-chip='@selection'>@selection</button><button data-chip='@terminal'>@terminal</button><button data-chip='@diagnostics'>@diagnostics</button><button data-chip='@git'>@git</button></div>",
+      "<div class='composer'><textarea id='input' placeholder='Type a task, question, or / for commands…'></textarea><div class='sendrow'><button id='send'>Send</button></div></div>",
       "<div style='display:none'><select id='target'><option value='workspace'>This project folder</option></select><input id='customPath'><input type='checkbox' id='fullAccess'><input type='checkbox' id='autoApply'><input type='checkbox' id='majorProject'><input type='checkbox' id='agenticLoop' checked><input type='checkbox' id='lowBandwidth'><input id='temperature' type='number' value='0.2'></div>",
       "<script>",
-      "var vscode = acquireVsCodeApi(); var mode = 'ask'; var currentBubble = null; var lastPlan = '';",
-      "function addMsg(text, cls){ var d=document.createElement('div'); d.className='msg '+cls; d.textContent=text; document.getElementById('chat').appendChild(d); return d; }",
+      "var vscode = acquireVsCodeApi(); var mode = 'ask'; var currentBubble = null; var lastPlan = ''; var approvedCount = 0;",
+      "function addMsg(text, cls){ var d=document.createElement('div'); d.className='msg '+cls; if(cls==='ai' && /No local LLM|failed|not installed|offline/i.test(text)){ d.className+=' error'; if(text.indexOf('Task Failed')<0){ var b=document.createElement('b'); b.textContent='Task Failed'; d.appendChild(b); d.appendChild(document.createElement('br')); } } d.appendChild(document.createTextNode(text)); document.getElementById('chat').appendChild(d); var c=document.getElementById('chat'); c.scrollTop=c.scrollHeight; return d; }",
       "function targetInfo(){ return {target: document.getElementById('target').value, customPath: document.getElementById('customPath').value, fullAccess: document.getElementById('fullAccess').checked}; }",
-      "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; document.getElementById('input').value=''; addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
+      "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; document.getElementById('input').value=''; if(document.getElementById('chatStage').style.display==='none'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; } addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
       "document.getElementById('stopBtn').addEventListener('click', function(){ vscode.postMessage({type:'stop'}); });",
       "document.getElementById('newChat').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
+      "document.getElementById('newChatTop').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
+      "document.getElementById('undo').addEventListener('click', function(){ vscode.postMessage({type:'undo'}); });",
+      "document.getElementById('fastBtn').addEventListener('click', function(e){ var cb=document.getElementById('lowBandwidth'); cb.checked=!cb.checked; e.target.classList.toggle('on', cb.checked); });",
+      "document.querySelectorAll('.chips button').forEach(function(b){ b.addEventListener('click', function(){ var inp=document.getElementById('input'); inp.value += (inp.value ? ' ' : '') + b.getAttribute('data-chip') + ' '; inp.focus(); }); });",
       "document.getElementById('downloadModel').addEventListener('click', function(){ var m=document.getElementById('model').value; vscode.postMessage({type:'downloadModel', model:m}); });",
       "document.getElementById('continueChat').addEventListener('click', function(){ var m=document.getElementById('model').value; vscode.postMessage({type:'continueToChat', model:m}); });",
+      "document.getElementById('installOllama').addEventListener('click', function(){ vscode.postMessage({type:'installOllama'}); });",
       "document.getElementById('changeModel').addEventListener('click', function(){ document.getElementById('chatStage').style.display='none'; document.getElementById('setup').style.display='block'; vscode.postMessage({type:'refresh'}); });",
       "document.getElementById('model').addEventListener('change', function(e){ vscode.postMessage({type:'setModel', model:e.target.value}); });",
       "document.getElementById('temperature').addEventListener('change', function(e){ vscode.postMessage({type:'temperature', value:e.target.value}); });",
       "document.getElementById('send').addEventListener('click', send);",
-      "document.getElementById('buildPlan').addEventListener('click', function(){ if(!lastPlan) return; addMsg('Build this plan','user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); mode='agent'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')==='agent'); }); vscode.postMessage({type:'chat', mode:'agent', text:'Build this plan exactly:\n'+lastPlan, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); document.getElementById('buildPlan').style.display='none'; });",
+      "document.getElementById('buildPlan').addEventListener('click', function(){ if(!lastPlan) return; addMsg('Build this plan','user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); mode='agent'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')==='agent'); }); vscode.postMessage({type:'chat', mode:'agent', text:'Build this plan exactly:\\n'+lastPlan, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); document.getElementById('buildPlan').style.display='none'; });",
       "document.getElementById('input').addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });",
-      "document.querySelectorAll('.modes button').forEach(function(b){ b.addEventListener('click', function(){ mode=b.getAttribute('data-mode'); document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x===b); }); }); });",
+      "document.querySelectorAll('.modes button[data-mode]').forEach(function(b){ b.addEventListener('click', function(){ mode=b.getAttribute('data-mode'); document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x===b); }); }); });",
       "document.getElementById('refresh').addEventListener('click', function(){ vscode.postMessage({type:'refresh'}); });",
-      "document.getElementById('undo').addEventListener('click', function(){ vscode.postMessage({type:'undo'}); });",
-      "document.getElementById('model').addEventListener('change', function(e){ vscode.postMessage({type:'setModel', model:e.target.value}); });",
-      "document.getElementById('approveAll').addEventListener('click', function(){ vscode.postMessage({type:'approveAll'}); });",
+      "document.getElementById('approveAll').addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; vscode.postMessage({type:'approveAll'}); });",
       "document.getElementById('reject').addEventListener('click', function(){ document.getElementById('proposal').style.display='none'; vscode.postMessage({type:'rejectProposal'}); });",
       "document.getElementById('runCmds').addEventListener('click', function(){ vscode.postMessage({type:'runCommands'}); });",
       "window.addEventListener('message', function(ev){ var m=ev.data;",
-      " if(m.type==='status'){ document.getElementById('dot').textContent = m.online ? '◉ FREE OLLAMA' : '○ Ollama offline'; document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
+      " if(m.type==='status'){ document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); document.getElementById('readyText').textContent = m.online ? 'Ready' : 'Ollama offline'; var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
-      " else if(m.type==='assistant'){ if(currentBubble){ currentBubble.remove(); currentBubble=null; } addMsg(m.text,'ai'); }",
+      " else if(m.type==='assistant'){ if(currentBubble && (currentBubble.textContent==='Thinking…' || currentBubble.textContent==='')){ currentBubble.remove(); } currentBubble=null; addMsg(m.text,'ai'); }",
       " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",
-      " else if(m.type==='setupStatus'){ document.getElementById('setupStatus').textContent=m.text; } else if(m.type==='showChat'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='block'; } else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
-      " else if(m.type==='prefill'){ document.getElementById('input').value=m.text; mode=m.mode||'ask'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); send(); }",
-      " else if(m.type==='setMode'){ mode=m.mode; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); }",
-      " else if(m.type==='proposal'){ var box=document.getElementById('proposal'); box.style.display='block'; var files=document.getElementById('files'); files.innerHTML=''; m.proposal.files.forEach(function(f){ var row=document.createElement('div'); row.textContent=(f.exists?'Update: ':'New file: ')+f.path+' '; var vb=document.createElement('button'); vb.className='small'; vb.textContent='View (review)'; vb.addEventListener('click', function(){ vscode.postMessage({type:'viewProposalFile', path:f.path}); }); row.appendChild(vb); var b=document.createElement('button'); b.className='small'; b.textContent='Approve this file'; b.addEventListener('click', function(){ vscode.postMessage({type:'approveFile', path:f.path}); }); row.appendChild(b); files.appendChild(row); if(f.preview){ var pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:#ddd;padding:6px;font-size:11px'; pre.textContent=f.preview; files.appendChild(pre); } }); var cmds=document.getElementById('cmds'); cmds.textContent = m.proposal.commands.length ? 'Commands (run only on approval): '+m.proposal.commands.join('  •  ') : 'No commands proposed.'; }",
+      " else if(m.type==='setupStatus'){ document.getElementById('setupStatus').textContent=m.text; } else if(m.type==='showChat'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; } else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
+      " else if(m.type==='prefill'){ document.getElementById('input').value=m.text; mode=m.mode||'ask'; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); send(); }",
+      " else if(m.type==='setMode'){ mode=m.mode; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); }",
+      " else if(m.type==='proposal'){ var box=document.getElementById('proposal'); box.style.display='block'; var files=document.getElementById('files'); files.innerHTML=''; m.proposal.files.forEach(function(f){ var row=document.createElement('div'); row.textContent=(f.exists?'Update: ':'New file: ')+f.path+' '; var vb=document.createElement('button'); vb.className='small'; vb.textContent='View (review)'; vb.addEventListener('click', function(){ vscode.postMessage({type:'viewProposalFile', path:f.path}); }); row.appendChild(vb); var b=document.createElement('button'); b.className='small'; b.textContent='Approve this file'; b.addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; vscode.postMessage({type:'approveFile', path:f.path}); }); row.appendChild(b); files.appendChild(row); if(f.preview){ var pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:#ddd;padding:6px;font-size:11px'; pre.textContent=f.preview; files.appendChild(pre); } }); var cmds=document.getElementById('cmds'); cmds.textContent = m.proposal.commands.length ? 'Commands (run only on approval): '+m.proposal.commands.join('  •  ') : 'No commands proposed.'; }",
       "});",
       "</script></body></html>"
     ].join("");
   }
+
 }
