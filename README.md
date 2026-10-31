@@ -2,7 +2,7 @@
 
 **Developed by NitinKumar Hiremath.**
 
-Vyntra is a local-first AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.
+Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.
 
 You ask it a question, plan a change, or build a whole app — and it never writes a file until you have reviewed and approved it.
 

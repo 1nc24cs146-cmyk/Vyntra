@@ -372,7 +372,7 @@
       }
     ]
   },
-  "description": "AI coding agent for Antigravity that works in your editor sidebar: multi-turn chat with history, Stop generation, retry on rate limits, temperature control, diff edits, Ask/Plan/Agent, inspect workspace first, reviewed multi-file proposals with snapshot, explicit approval, approved commands, validation after accepted edits \u2014 free local Ollama models only, no API key, no separate IDE, no GPU settings.",
+  "description": "Vyntra is a AI coding agent for Antigravity",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
@@ -402,7 +402,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.21",
+  "version": "0.9.22",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
