@@ -402,7 +402,8 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.20",
+  "version": "0.9.21",
+  "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
     "url": "https://github.com/1nc24cs146-cmyk/Vyntra.git"
