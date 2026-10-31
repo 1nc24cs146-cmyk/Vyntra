@@ -7,7 +7,7 @@ import { estimateTokens, retrieveOlderChats, trimHistory, LlmMessage } from "./l
 import { checkOpenAi, openAiChatStream } from "./openai";
 import { buildTemplateApp } from "./templates";
 import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
-import { buildRootForPrompt, desktopDir, resolveTargetRoot, TargetKind } from "./desktop";
+import { buildRootForPrompt, desktopDir, resolveTargetRoot, sanitizeProjectName, TargetKind } from "./desktop";
 import { checkGemini, geminiChatStream } from "./gemini";
 import { buildLanguageProject, detectLanguage, platformInfo } from "./languages";
 
@@ -704,7 +704,14 @@ function buildTargetUri(prompt: string, mode: Mode): vscode.Uri | undefined {
   if (mode !== "build") {
     return workspaceRootUri();
   }
-  const root = buildRootForPrompt(targetKind, targetCustom, workspaceRootUri()?.fsPath, prompt);
+  const ws = workspaceRootUri()?.fsPath;
+  if (targetKind === "workspace" && ws && isFromScratchRequest(prompt)) {
+    // "Do it on your own, from scratch" = a new folder for this project,
+    // never loose files dumped into the open workspace.
+    const folder = sanitizeProjectName(prompt);
+    return vscode.Uri.file(require("path").join(ws, folder));
+  }
+  const root = buildRootForPrompt(targetKind, targetCustom, ws, prompt);
   return root ? vscode.Uri.file(root) : undefined;
 }
 
@@ -813,7 +820,9 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
 function systemPrompt(mode: Mode): string {
   const universal =
     "You are Vyntra, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
-    platformInfo();
+    platformInfo() +
+    " SECURITY (always, especially for websites): write secure code by default — escape/sanitise all user input, never insert user data with innerHTML (use textContent / DOM creation), add a Content-Security-Policy meta tag to web pages, never put API keys, passwords or secrets in client code, validate input on every form, use parameterised queries / prepared statements for databases, hash passwords (never store plain text), use HTTPS links only, and add a short SECURITY note in the README naming what was secured. " +
+    " DECISIONS: small decisions (language, file names, colours, layout, library choice for a small task) — decide them yourself at once, do not ask, and say what you decided in the README/proposal. Big decisions (a complete/full project, database choice, login/auth design, payments, hosting/deployment, architecture) — if the user has not already chosen, ask ONCE with 2-3 options and a clearly marked recommended option, then wait for their answer; if they answer 'you decide' / 'anything' / 'do it', go with the recommended option and say so.";
   if (mode === "plan") {
     return [
       universal,
@@ -874,6 +883,34 @@ function systemPrompt(mode: Mode): string {
   ].join("\n");
 }
 
+
+// --- Decisions, security, and from-scratch folders (user request, 0.9.20) ---
+function isFromScratchRequest(text: string): boolean {
+  return /\b(from scratch|on your own|do it yourself|create (a )?folder|new folder|own folder|from the beginning)\b/i.test(text);
+}
+function isBigDecision(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/\b(use|with|using)\s+(sqlite|postgres|mysql|firebase|mongodb|supabase)\b/.test(lower)) { return false; }
+  if (/\b(no (database|auth|login)|local only|localstorage only)\b/.test(lower)) { return false; }
+  return /\b(complete|full|entire|whole)\s+(app|website|project|system)/.test(lower)
+    || /\b(database|auth|login|sign[- ]?in|payment|hosting|deploy|architecture|e-?commerce|shop|store)\b/.test(lower)
+    || isMajorRequest(text);
+}
+function recommendOption(text: string): string {
+  const lower = text.toLowerCase();
+  if (/shop|store|e-?commerce/.test(lower)) { return "Static website + localStorage cart, no backend and no payments — fastest, safest to start; add a real backend later only if you need real orders."; }
+  if (/auth|login|sign[- ]?in/.test(lower)) { return "Local-only demo login (no real passwords stored in client code) — real auth needs a backend and password hashing, which I will add only if you confirm."; }
+  if (/database/.test(lower)) { return "localStorage / a local file database (SQLite) — no cloud account, no key, data stays on your machine."; }
+  if (/website|web/.test(lower)) { return "Plain HTML/CSS/JS, self-contained, no build step — fastest to run, smallest attack surface, with CSP and escaped user input."; }
+  return "Plain, self-contained build with local storage, no cloud backend — fastest and safest to start, easy to upgrade later.";
+}
+function autoDecisionNote(text: string): string {
+  const lang = detectLanguage(text);
+  const langName = lang ? lang.name : "HTML/CSS/JS (plain website, no build step)";
+  return "Auto-decided (small decision, no question asked): language " + langName + ", plain self-contained structure, local storage for persistence, secure defaults (escaped user input, CSP for web pages, no secrets in client code).";
+}
+let pendingBigDecision: { recommendation: string; text: string } | null = null;
+
 // Only inspect the workspace when the user actually asks for it — a
 // mention of the project/files, an @ mention, a file path/extension, or
 // selected code in the editor. Otherwise the task is answered directly,
@@ -896,6 +933,28 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   currentRequestRoot = buildTargetUri(text, mode);
   agentState = { autoApply, lastOutput: "", mode, step: 1, task: text };
   const online = await providerOnline(cfg);
+  // Big-decision gate (asked ONCE, then the user decides or says 'you decide'):
+  if (online && (mode === "agent" || mode === "build")) {
+    const saidYouDecide = /\b(you decide|anything|do it|go ahead|yes,? (do|build) it|ok,? (do|build) it)\b/i.test(text);
+    if (pendingBigDecision && saidYouDecide) {
+      view?.webview.postMessage({ text: "You didn't pick an option, so I am going with the better option I suggested: " + pendingBigDecision.recommendation, type: "assistant" });
+      pendingBigDecision = null;
+    } else if (pendingBigDecision && !saidYouDecide) {
+      // The user's reply IS their answer to the one question — clear it and build with it.
+      pendingBigDecision = null;
+    } else if (!pendingBigDecision && isBigDecision(text)) {
+      const rec = recommendOption(text);
+      pendingBigDecision = { recommendation: rec, text };
+      view?.webview.postMessage({ text: "One question before I build this (this is a big decision, so I am asking once, not deciding it myself):\n\nRecommended (better option): " + rec + "\n\nReply with your choice — or just say 'you decide' and I will go with the recommended option above.", type: "assistant" });
+      await refreshStatus(true);
+      return;
+    }
+  }
+  // From-scratch folder notice, so the user sees where files will go.
+  if (mode === "build" && isFromScratchRequest(text) && currentRequestRoot) {
+    view?.webview.postMessage({ text: "Building from scratch in a new folder: " + currentRequestRoot.fsPath + " — files will go there, not loose in your workspace.", type: "assistant" });
+  }
+  const autoNote = autoDecisionNote(text);
   const inspectWorkspace = needsWorkspaceContext(text);
   // Speed: Ask questions use a small context (4 files, 30k budget via
   // low-bandwidth mode) — a huge prompt is the main reason CPU answers
@@ -962,7 +1021,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   const retrieved = cfg.chatMemoryEnabled ? retrieveOlderChats(text, olderChats, cfg.chatMemoryResultCount, cfg.chatMemoryRetrievedCharacters) : [];
   const olderSection = retrieved.length ? "\n\nOlder chat retrieved (lexical match, not current history):\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
   const userTurn: LlmMessage = {
-    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + olderSection + "\n" + platformInfo(),
+    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + olderSection + "\n" + platformInfo() + "\n" + autoNote,
     role: "user"
   };
   conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
