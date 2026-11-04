@@ -1,21 +1,46 @@
-# Vyntra for Antigravity
+<div align="center">
 
-**Developed by NitinKumar Hiremath.**
+# 🏠 Vyntra for Antigravity
+### AI that reads your project first. And changes nothing until you say so.
 
-Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.
+**Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-You ask it a question, plan a change, or build a whole app — and it never writes a file until you have reviewed and approved it.
+[![Version](https://img.shields.io/badge/Version-v0.9.25-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
+[![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
+
+[🚀 Quick start](#-quick-start) •
+[🖥️ Panel](#-the-panel-at-a-glance) •
+[🎛️ Modes](#-modes) •
+[✨ Skills](#-skills) •
+[🛡️ Safety](#-safety-in-short)
+
+</div>
 
 ---
 
-## Why local-first?
+## 📊 At a glance
+
+| | |
+|---|---|
+| **Extension** | `nitinkumarhiremath.vyntra` — v0.9.25 |
+| **Editor** | Antigravity |
+| **Models** | Ollama on your own machine — no cloud model, no API key |
+| **Account** | None. No sign-in, no subscription, no telemetry |
+| **Review rule** | Nothing is written until you approve it — Ask and Plan never write at all |
+| **Also published as** | LocalNest (`localnest.localnest-antigravity`) — the same extension with LocalNest branding, live on Open VSX |
+| **License** | MIT |
+
+You ask it a question, plan a change, or build a whole app — and it never writes a file until you have reviewed and approved it.
+
+## 🌟 Why local-first?
 
 - **Your code stays on your machine.** The model runs through Ollama on your desktop. Vyntra does not send your project to a cloud model.
 - **No subscription, no API key.** The models are free Ollama models. You pull the one you want, once, and use it as much as you like.
 - **No GPU setup.** Ollama runs on CPU by default. A smaller model (3B) answers much faster on a normal laptop than a larger one (7B).
 - **You stay in control.** Every file change and every command passes through you first.
 
-## Quick start
+## 🚀 Quick start
 
 1. **Install Ollama** on your desktop from [ollama.com/download](https://ollama.com/download), then start it. On Windows, Ollama runs in the system tray after install.
 2. **Pull a model** you want, in a terminal:
@@ -30,7 +55,7 @@ You ask it a question, plan a change, or build a whole app — and it never writ
 
 That's it. No sign-in, no key, no extra IDE.
 
-## The panel at a glance
+## 🖥️ The panel at a glance
 
 The panel is deliberately simple, in two stages:
 
@@ -50,7 +75,7 @@ The panel is deliberately simple, in two stages:
 
 Everything else lives in the Command Palette, not in the panel, so the panel stays clean.
 
-## First open: the system check
+## 🔍 First open: the system check
 
 The first time Vyntra opens, it checks your machine and tells you plainly what is missing, instead of failing silently:
 
@@ -63,7 +88,7 @@ The first time Vyntra opens, it checks your machine and tells you plainly what i
 
 If Ollama is already installed, Vyntra will also try to start it automatically when it is offline, on your machine only. It never downloads a model without you pressing Download.
 
-## Modes
+## 🎛️ Modes
 
 | Mode | What it does | Does it change files? |
 |---|---|---|
@@ -74,7 +99,7 @@ If Ollama is already installed, Vyntra will also try to start it automatically w
 
 You can switch modes at any time. Ask and Plan are safe to use freely — they cannot change a file, even by accident.
 
-## Skills
+## ✨ Skills
 
 Type a skill at the start of your message, in any mode, with your local Ollama model — no key, no extra install:
 
@@ -94,7 +119,7 @@ Type `/skills` any time to see the list again. Example: `/review look at this fu
 
 You can also export a whole chat: press **Export chat** in the panel (or run "LocalNest: Export Chat to Markdown"). It opens as a document for you to save — nothing is written to disk automatically.
 
-## How it works
+## ⚙️ How it works
 
 1. **You give a task.** Type it in the panel, in any mode, in any programming language.
 2. **It looks at your project only when you ask it to.** If you mention your project, a file, or a folder, use an @ chip, name a file, or select code in the editor, Vyntra inspects that project first and shows you which files it used as context. If you just ask a general question or give a new task, it works on that task directly, with no project scan slowing it down.
@@ -104,7 +129,7 @@ You can also export a whole chat: press **Export chat** in the panel (or run "Lo
 6. **It verifies after approval.** After you approve files, Vyntra checks the result and shows the output. If something is still missing or broken, it proposes a fix, and that fix goes through the same review again, up to 5 steps.
 7. **You can always undo.** The original contents of every file are recorded before approval. **Undo last approved changes** restores edited files and deletes newly created files from that batch.
 
-## Choosing a model
+## 🤖 Choosing a model
 
 Any Ollama model works, and you can type an exact model name in the panel if it is not in the list. A few good starting points:
 
@@ -119,13 +144,13 @@ Practical notes:
 - If an answer seems stuck, press **Stop**, turn Fast on, and ask once again. Do not send the same question twice in a row.
 - Chat keeps a short history, so follow-up questions ("now do the same for the other file") work without repeating everything.
 
-## Building whole apps
+## 🏗️ Building whole apps
 
 In **Build** mode, tell Vyntra what to build — a website, a desktop app, a Python project, a game, anything. It generates every file needed to run it, shows them as one proposal, and writes them only after your approval, with the same review, command, verify, and undo steps as Agent mode.
 
 If no model is reachable, Build still works offline: it creates a working website or app from a built-in template, so you are never blocked by Ollama being off.
 
-## Safety, in short
+## 🛡️ Safety, in short
 
 - Ask and Plan never write files.
 - Agent and Build write only after your approval, unless you deliberately turn on "Auto-create without review" (off by default, and clearly labelled as skipping approval).
@@ -134,13 +159,13 @@ If no model is reachable, Build still works offline: it creates a working websit
 - No telemetry. No account. No code leaves your machine to answer you.
 - File writes are capped by a size setting, so a runaway proposal cannot silently replace a huge file.
 
-## Requirements
+## 📋 Requirements
 
 - Antigravity (any recent version)
 - Ollama installed on the same machine, with at least one model pulled
 - That's all. No account, no key, no GPU, no separate IDE.
 
-## Troubleshooting
+## 🔧 Troubleshooting
 
 - **"Ollama is NOT installed"** — install it from ollama.com/download, restart Antigravity, and open Vyntra Chat again.
 - **"Ollama is offline"** — start it with `ollama serve` in a terminal, or let Vyntra try to start it automatically, then press Refresh in the panel.
@@ -149,7 +174,7 @@ If no model is reachable, Build still works offline: it creates a working websit
 - **"Model not found"** — the saved model was not pulled. Pick a model that is actually on your machine in the dropdown, or type its exact pulled name.
 - **Chat is not opening** — press **Diagnose chat** in the panel, or open Vyntra Chat from the Command Palette.
 
-## Commands
+## ⌨️ Commands
 
 The main commands, all in the Command Palette under "Vyntra: …":
 
@@ -159,7 +184,7 @@ The main commands, all in the Command Palette under "Vyntra: …":
 - Refresh Models, Test My Model, Diagnose Chat
 - Set Ollama Host, Set Model
 
-## License
+## 📄 License
 
 MIT License. Copyright (c) 2026 NitinKumar Hiremath. See LICENSE for the full text.
 
