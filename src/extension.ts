@@ -71,6 +71,7 @@ function applyHistory(next: LlmMessage[], maxChars: number): LlmMessage[] {
   if (dropped.length > 0) {
     olderChats = [...olderChats, ...dropped].slice(-50);
     saveOlderChats();
+    updateContextSummary(dropped);
   }
   conversationHistory = trimmed;
   saveChatMemory();
@@ -93,10 +94,203 @@ function clearConversation() {
   view?.webview.postMessage({ text: "New chat started — history cleared.", type: "assistant" });
 }
 
+// --- Saved chat sessions (0.9.26) ---
+// One session = one named thread. Sessions live in the same state store as
+// chat memory (workspaceState by default, globalState when scope is "all"),
+// so they survive the panel closing — the panel is only a view, the thread
+// is not lost with it. A session is created on the first user message, not
+// on every panel open, so empty opens do not spam the list.
+interface ChatSession { id: string; title: string; createdAt: number; updatedAt: number; messages: LlmMessage[]; }
+let chatSessions: ChatSession[] = [];
+let currentSessionId: string | null = null;
+let contextSummary = "";
+let contextSummaryCount = 0;
+let lastTrimNotice = "";
+function sessionTitleFrom(messages: LlmMessage[]): string {
+  const firstUser = messages.find((m) => m.role === "user");
+  const raw = (firstUser ? firstUser.content : "New chat").replace(/\s+/g, " ").trim();
+  return raw.length > 48 ? raw.slice(0, 48) + "…" : (raw || "New chat");
+}
+function saveSessions() {
+  try {
+    void memoryState().update("localNest.chatSessions", chatSessions);
+    void memoryState().update("localNest.currentSessionId", currentSessionId);
+    void memoryState().update("localNest.contextSummary", contextSummary);
+    void memoryState().update("localNest.contextSummaryCount", contextSummaryCount);
+  } catch { /* sessions are best-effort */ }
+}
+function loadSessions() {
+  try {
+    const s = memoryState().get<ChatSession[]>("localNest.chatSessions", []);
+    if (Array.isArray(s)) { chatSessions = s.filter((x) => x && typeof x.id === "string" && Array.isArray(x.messages)); }
+    const cur = memoryState().get<string | null>("localNest.currentSessionId", null);
+    currentSessionId = typeof cur === "string" ? cur : null;
+    contextSummary = memoryState().get<string>("localNest.contextSummary", "") || "";
+    contextSummaryCount = memoryState().get<number>("localNest.contextSummaryCount", 0) || 0;
+    // Legacy migration: a pre-session thread becomes session #1, not lost.
+    if (!chatSessions.length && conversationHistory.length) {
+      const now = Date.now();
+      chatSessions = [{ id: "session-" + now, title: sessionTitleFrom(conversationHistory), createdAt: now, updatedAt: now, messages: [...conversationHistory] }];
+      currentSessionId = chatSessions[0].id;
+      saveSessions();
+      return;
+    }
+    if (currentSessionId) {
+      const curSession = chatSessions.find((x) => x.id === currentSessionId);
+      if (curSession) { conversationHistory = [...curSession.messages]; return; }
+    }
+    if (chatSessions.length) { currentSessionId = chatSessions[0].id; conversationHistory = [...chatSessions[0].messages]; }
+  } catch { /* start fresh */ }
+}
+function saveCurrentSession() {
+  try { if (!getConfig().chatMemoryEnabled) { return; } } catch { /* fall through */ }
+  if (!currentSessionId) { return; }
+  const s = chatSessions.find((x) => x.id === currentSessionId);
+  if (!s) { return; }
+  s.messages = [...conversationHistory];
+  s.updatedAt = Date.now();
+  if (s.title === "New chat" || !s.title) { s.title = sessionTitleFrom(conversationHistory); }
+  saveSessions();
+}
+function ensureSession() {
+  try { if (!getConfig().chatMemoryEnabled) { return; } } catch { /* fall through */ }
+  if (currentSessionId && chatSessions.some((x) => x.id === currentSessionId)) { return; }
+  const now = Date.now();
+  const s: ChatSession = { id: "session-" + now + "-" + Math.floor(Math.random() * 10000), title: "New chat", createdAt: now, updatedAt: now, messages: [...conversationHistory] };
+  chatSessions.unshift(s);
+  currentSessionId = s.id;
+  saveSessions();
+}
+function startNewSession() {
+  saveCurrentSession();
+  const now = Date.now();
+  const s: ChatSession = { id: "session-" + now + "-" + Math.floor(Math.random() * 10000), title: "New chat", createdAt: now, updatedAt: now, messages: [] };
+  chatSessions.unshift(s);
+  currentSessionId = s.id;
+  conversationHistory = [];
+  saveChatMemory();
+  saveSessions();
+  postSessions();
+  view?.webview.postMessage({ messages: [], type: "restoreHistory" });
+  view?.webview.postMessage({ text: "New chat started — past chats are still in Past chats below.", type: "assistant" });
+}
+function openSession(id: string) {
+  const s = chatSessions.find((x) => x.id === id);
+  if (!s) { return; }
+  saveCurrentSession();
+  currentSessionId = s.id;
+  conversationHistory = [...s.messages];
+  saveChatMemory();
+  saveSessions();
+  postSessions();
+  view?.webview.postMessage({ messages: s.messages.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" });
+  view?.webview.postMessage({ text: "Reopened chat: " + s.title + " (" + s.messages.length + " message(s)).", type: "assistant" });
+  postContext("ask");
+}
+function deleteSession(id: string) {
+  chatSessions = chatSessions.filter((x) => x.id !== id);
+  if (currentSessionId === id) {
+    currentSessionId = null;
+    conversationHistory = [];
+    saveChatMemory();
+    if (chatSessions.length) { currentSessionId = chatSessions[0].id; conversationHistory = [...chatSessions[0].messages]; }
+  }
+  saveSessions();
+  postSessions();
+  if (currentSessionId) {
+    const cur = chatSessions.find((x) => x.id === currentSessionId);
+    if (cur) { view?.webview.postMessage({ messages: cur.messages.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" }); }
+  } else {
+    view?.webview.postMessage({ messages: [], type: "restoreHistory" });
+  }
+}
+function postSessions() {
+  view?.webview.postMessage({ sessions: chatSessions.map((s) => ({ count: s.messages.length, id: s.id, title: s.title, updatedAt: s.updatedAt })), type: "sessions" });
+}
+// --- Context meter + auto-summary (0.9.26) ---
+// Truncation used to be silent: trimHistory dropped old messages into an
+// unreadable store. Now every dropped batch gets an extractive summary
+// (topics + first asks + last outcome, no model call, so it works offline),
+// that summary is kept and fed back into later prompts, and the user is
+// told, in the panel, that it happened.
+function updateContextSummary(dropped: LlmMessage[]) {
+  if (!dropped.length) { return; }
+  const asks = dropped.filter((m) => m.role === "user").slice(0, 3).map((m) => m.content.replace(/\s+/g, " ").slice(0, 160));
+  const lastAssistant = [...dropped].reverse().find((m) => m.role === "assistant");
+  const note = "Earlier chat (" + dropped.length + " message(s) trimmed): " + (asks.length ? "asked: " + asks.join(" | ") : "no user asks kept") + (lastAssistant ? " — last outcome: " + lastAssistant.content.replace(/\s+/g, " ").slice(0, 200) : "");
+  contextSummary = (contextSummary ? contextSummary + "\n" : "") + note;
+  if (contextSummary.length > 6000) { contextSummary = contextSummary.slice(-6000); }
+  contextSummaryCount += dropped.length;
+  lastTrimNotice = "Context note: " + dropped.length + " older message(s) were trimmed and summarised, not lost silently. Summary is kept and used for later answers (" + contextSummaryCount + " message(s) summarised so far).";
+  saveSessions();
+}
+function contextWindowTokens(cfg: Config): number {
+  return cfg.ollamaContextWindow && cfg.ollamaContextWindow > 0 ? cfg.ollamaContextWindow : 4096;
+}
+function postContext(mode: Mode) {
+  try {
+    const cfg = getConfig();
+    const windowTokens = contextWindowTokens(cfg);
+    const historyTokens = conversationHistory.reduce((s, m) => s + estimateTokens(m.content), 0);
+    const systemTokens = estimateTokens(systemPrompt(mode));
+    const used = historyTokens + systemTokens + (contextSummary ? estimateTokens(contextSummary) : 0);
+    const pct = Math.min(100, Math.round((used / windowTokens) * 100));
+    view?.webview.postMessage({ pct, summaryCount: contextSummaryCount, tokens: used, type: "context", window: windowTokens });
+  } catch { /* meter is best-effort */ }
+}
+// --- Custom skills + project rules (0.9.26) ---
+async function loadCustomSkills(): Promise<Record<string, Skill>> {
+  const out: Record<string, Skill> = {};
+  try {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || !folders.length) { return out; }
+    const files = await vscode.workspace.findFiles(".localnest/skills/*.md");
+    for (const f of files) {
+      try {
+        const text = Buffer.from(await vscode.workspace.fs.readFile(f)).toString("utf8");
+        const name = f.path.split("/").pop()!.replace(/\.md$/i, "").toLowerCase();
+        if (!name || !/^[a-z0-9_-]+$/.test(name)) { continue; }
+        const lines = text.split("\n");
+        const first = lines.find((l) => l.trim().length > 0) || "";
+        const description = first.startsWith("#") ? first.replace(/^#+\s*/, "").trim() : "Custom skill from .localnest/skills/" + name + ".md";
+        const prompt = first.startsWith("#") ? lines.slice(lines.indexOf(first) + 1).join("\n").trim() || text : text;
+        if (prompt) { out[name] = { description, prompt }; }
+      } catch { /* skip one bad skill file */ }
+    }
+  } catch { /* no custom skills */ }
+  return out;
+}
+async function loadProjectRules(): Promise<{ content: string; file: string } | null> {
+  try {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders || !folders.length) { return null; }
+    const root = folders[0].uri;
+    for (const rel of [".localnest/rules.md", "AGENTS.md", ".cursorrules", ".github/copilot-instructions.md"]) {
+      try {
+        const uri = vscode.Uri.joinPath(root, rel);
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.size > 0) {
+          const text = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString("utf8").slice(0, 8000);
+          if (text.trim()) { return { content: text, file: rel }; }
+        }
+      } catch { /* try next candidate */ }
+    }
+  } catch { /* no rules */ }
+  return null;
+}
+async function skillsHelpTextFull(): Promise<string> {
+  const custom = await loadCustomSkills();
+  const built = "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n");
+  const customText = Object.keys(custom).length ? "\n\nYour skills (.localnest/skills/*.md):\n" + Object.entries(custom).map(([n, s]) => "/" + n + " — " + s.description).join("\n") : "\n\nYour skills: none yet. Add a file .localnest/skills/<name>.md in your project — first line '# description', rest is the skill prompt.";
+  const rules = await loadProjectRules();
+  return built + customText + (rules ? "\n\nProject rules loaded from " + rules.file + "." : "\n\nProject rules: none found. Add .localnest/rules.md or AGENTS.md to your project to set them.") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
+}
+
 export function activate(context: vscode.ExtensionContext) {
   extContext = context;
   secretStorage = context.secrets;
   loadChatMemory();
+  loadSessions();
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "localNest.refreshOllama";
   statusBar.text = "○ Ollama: checking…";
@@ -248,8 +442,16 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.window.showTextDocument(doc, { preview: false });
       vscode.window.showInformationMessage("LocalNest: chat opened as a document — save it with Ctrl+S / Cmd+S. Nothing was written to disk automatically.");
     }),
+    vscode.commands.registerCommand("localNest.listSessions", async () => {
+      loadSessions();
+      if (!chatSessions.length) { vscode.window.showInformationMessage("LocalNest: no past chats saved yet."); return; }
+      const pick = await vscode.window.showQuickPick(chatSessions.map((s) => ({ description: s.messages.length + " message(s) · " + new Date(s.updatedAt).toLocaleString(), detail: s.id, label: s.title })), { placeHolder: "Reopen a past chat" });
+      if (!pick) { return; }
+      await vscode.commands.executeCommand("localNest.openChat");
+      setTimeout(() => { openSession(pick.detail); }, 400);
+    }),
     vscode.commands.registerCommand("localNest.newChat", async () => {
-      clearConversation();
+      startNewSession();
     }),
     vscode.commands.registerCommand("localNest.cancelAgent", async () => { stopGeneration(); }),
     vscode.commands.registerCommand("localNest.setAgentMode", async () => {
@@ -359,7 +561,7 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }),
     vscode.commands.registerCommand("localNest.openAgent", async () => { await vscode.commands.executeCommand("localNest.openChat"); }),
-    vscode.commands.registerCommand("localNest.newConversation", async () => { clearConversation(); }),
+    vscode.commands.registerCommand("localNest.newConversation", async () => { startNewSession(); }),
     vscode.commands.registerCommand("localNest.setGeminiApiKey", async () => {
       const key = await vscode.window.showInputBox({
         password: true,
@@ -849,17 +1051,18 @@ function skillsHelpText(): string {
   return "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
 }
 
-function systemPrompt(mode: Mode, skillPrompt?: string): string {
+function systemPrompt(mode: Mode, skillPrompt?: string, projectRules?: { content: string; file: string } | null): string {
   const universal =
     "You are Vyntra, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
     platformInfo() +
     " SECURITY (always, especially for websites): write secure code by default — escape/sanitise all user input, never insert user data with innerHTML (use textContent / DOM creation), add a Content-Security-Policy meta tag to web pages, never put API keys, passwords or secrets in client code, validate input on every form, use parameterised queries / prepared statements for databases, hash passwords (never store plain text), use HTTPS links only, and add a short SECURITY note in the README naming what was secured.";
   const skillSection = skillPrompt ? " SKILL IN USE: " + skillPrompt + " Follow this skill above all other style rules, but still answer exactly the current request." : "";
+  const rulesSection = projectRules ? " PROJECT RULES (from " + projectRules.file + " in this project — follow these for every answer, they override generic style):\n" + projectRules.content : "";
   const questionFirst = " RULE: answer the user's CURRENT request exactly as asked, in the mode selected. Do not change topic, do not answer a different question, do not build a different project, and do not repeat an older task from history. If the request is a question, answer that question first and directly, before any extra detail. Workspace context and older chat are background only — they must never replace the current request.";
   const decisions = " DECISIONS (Agent/Build only): small decisions (language, file names, colours, layout, library choice for a small task) — decide them yourself at once, do not ask, and say what you decided in the README/proposal. Big decisions (a complete/full project, database choice, login/auth design, payments, hosting/deployment, architecture) — if the user has not already chosen, ask ONCE with 2-3 options and a clearly marked recommended option, then wait for their answer; if they answer 'you decide' / 'anything' / 'do it', go with the recommended option and say so.";
   if (mode === "plan") {
     return [
-      universal + skillSection + questionFirst,
+      universal + rulesSection + skillSection + questionFirst,
       "Plan ONLY what the user asked for in the current request — nothing else.",
       "You never claim a change has been made.",
       "Produce ONLY a plan, in this shape:",
@@ -872,7 +1075,7 @@ function systemPrompt(mode: Mode, skillPrompt?: string): string {
   }
   if (mode === "agent") {
     return [
-      universal + skillSection + questionFirst + decisions,
+      universal + rulesSection + skillSection + questionFirst + decisions,
       "Propose changes; the user approves each one before anything is written.",
       "If the user asked a question or for an explanation (not a change), answer it in plain text — do NOT force it into FILE blocks.",
       "If a change is needed, output ONLY this format, nothing else before or after:",
@@ -891,7 +1094,7 @@ function systemPrompt(mode: Mode, skillPrompt?: string): string {
   }
   if (mode === "build") {
     return [
-      universal + skillSection + questionFirst + decisions,
+      universal + rulesSection + skillSection + questionFirst + decisions,
       "You build complete, working apps in ANY language the user names.",
       "Build EXACTLY what the user asked for in the current request — same topic, same language, same features. Do not substitute a different app.",
       "If the user asked a question or for an explanation (not a build), answer it in plain text — do NOT force it into FILE blocks.",
@@ -913,7 +1116,7 @@ function systemPrompt(mode: Mode, skillPrompt?: string): string {
     ].join("\n");
   }
   return [
-    universal + skillSection + questionFirst,
+    universal + rulesSection + skillSection + questionFirst,
     "Answer ANY question the user asks — coding or general, about this workspace or not, in any programming language they ask for.",
     "Answer the exact question asked first, directly and completely. Do not turn a question into a project build unless the user asked for one.",
     "Use the workspace context when it is relevant and cite file paths then. When it is not relevant, answer from your own knowledge and say so.",
@@ -975,15 +1178,18 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   // skill never gets mistaken for a normal question, and /skills lists them.
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
   let skillPrompt: string | undefined;
+  const customSkills = await loadCustomSkills();
+  const allSkills: Record<string, Skill> = { ...SKILLS, ...customSkills };
+  const projectRules = await loadProjectRules();
   if (slash) {
     const name = slash[1].toLowerCase();
     if (name === "skills" || name === "help") {
-      view?.webview.postMessage({ text: skillsHelpText(), type: "assistant" });
+      view?.webview.postMessage({ text: await skillsHelpTextFull(), type: "assistant" });
       return;
     }
-    const skill = SKILLS[name];
+    const skill = allSkills[name];
     if (!skill) {
-      view?.webview.postMessage({ text: "Unknown skill '/" + name + "'.\n\n" + skillsHelpText(), type: "assistant" });
+      view?.webview.postMessage({ text: "Unknown skill '/" + name + "'.\n\n" + await skillsHelpTextFull(), type: "assistant" });
       return;
     }
     if (!slash[2].trim()) {
@@ -1087,12 +1293,13 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   const olderSection = retrieved.length ? "\n\nOlder chat — BACKGROUND ONLY, do NOT answer these instead of the current request:\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
   const modeNote = (mode === "agent" || mode === "build") ? "\n" + autoNote : "";
   const userTurn: LlmMessage = {
-    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + olderSection + "\n" + platformInfo() + modeNote,
+    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + (contextSummary ? "\n\nSummary of earlier chat (already trimmed, use this instead of the dropped messages):\n" + contextSummary : "") + olderSection + "\n" + platformInfo() + modeNote,
     role: "user"
   };
   conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
+  ensureSession(); saveCurrentSession(); postSessions(); postContext(mode); if (lastTrimNotice) { view?.webview.postMessage({ text: lastTrimNotice, type: "assistant" }); lastTrimNotice = ""; }
   const messages: LlmMessage[] = [
-    { content: systemPrompt(mode, skillPrompt), role: "system" },
+    { content: systemPrompt(mode, skillPrompt, projectRules), role: "system" },
     ...conversationHistory
   ];
 
@@ -1110,6 +1317,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   }
   if (!streamError && full) {
     conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
+    saveCurrentSession(); postSessions(); postContext(mode); if (lastTrimNotice) { view?.webview.postMessage({ text: lastTrimNotice, type: "assistant" }); lastTrimNotice = ""; }
     const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
     view?.webview.postMessage({ type: "streamDone" });
     view?.webview.postMessage({ text: "— " + secs + "s · ~" + estimateTokens(full) + " tokens in this reply (estimate, 1 token ≈ 4 chars) · history: " + conversationHistory.length + " message(s) kept", type: "assistant" });
@@ -1139,6 +1347,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
           streamError = null;
           if (full) {
             conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
+    saveCurrentSession(); postSessions(); postContext(mode); if (lastTrimNotice) { view?.webview.postMessage({ text: lastTrimNotice, type: "assistant" }); lastTrimNotice = ""; }
           }
         } catch (err2: any) {
           streamError = err2;
@@ -1667,7 +1876,11 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
           await vscode.window.showTextDocument(doc, { preview: false });
         }
       } else if (msg.type === "newChat") {
-        clearConversation();
+        startNewSession();
+      } else if (msg.type === "openSession") {
+        openSession(String(msg.id || ""));
+      } else if (msg.type === "deleteSession") {
+        deleteSession(String(msg.id || ""));
       } else if (msg.type === "setOpenAIKey") {
         await vscode.commands.executeCommand("localNest.setOpenAIApiKey");
       } else if (msg.type === "temperature") {
@@ -1795,6 +2008,15 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
     void (async () => {
       const res = await runSystemCheck();
       await refreshStatus(false);
+      postSessions();
+      postContext("ask");
+      if (conversationHistory.length) {
+        view?.webview.postMessage({ messages: conversationHistory.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" });
+      }
+      const rules0 = await loadProjectRules();
+      if (rules0) { view?.webview.postMessage({ text: "Project rules loaded from " + rules0.file + " — they will be followed for every answer in this project.", type: "assistant" }); }
+      const custom0 = await loadCustomSkills();
+      if (Object.keys(custom0).length) { view?.webview.postMessage({ text: "Your skills loaded: " + Object.keys(custom0).map((n) => "/" + n).join(", ") + " (from .localnest/skills/). Type /skills to see all skills.", type: "assistant" }); }
       if (res.models.length) {
         view?.webview.postMessage({ type: "showChat" });
       } else if (!res.installed) {
@@ -1841,6 +2063,8 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "</div>",
       "<div id='chatStage' style='display:none;flex:1;flex-direction:column;min-height:0'>",
       "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='exportChat'>Export chat</button><button class='small' id='undo'>Undo last apply</button></div>",
+      "<div style='margin:8px 12px;padding:10px;border:1px solid var(--vscode-panel-border);border-radius:10px'><b>Past chats</b><div id='sessionList' style='margin-top:6px;color:var(--vscode-descriptionForeground)'>No past chats yet.</div></div>",
+      "<div style='margin:0 12px 8px'><div style='display:flex;justify-content:space-between;font-size:12px;color:var(--vscode-descriptionForeground)'><span>Context used</span><span id='ctxText'>0 tokens</span></div><div style='height:8px;border-radius:4px;background:var(--vscode-panel-border);overflow:hidden;margin-top:4px'><div id='ctxFill' style='height:100%;width:0%;background:#2dd4bf'></div></div><div id='ctxSummary' style='font-size:12px;color:var(--vscode-descriptionForeground);margin-top:4px'></div></div>",
       "<button class='small' id='buildPlan' style='display:none;margin:8px 12px'>Build this plan (Agent mode)</button>",
       "<div id='proposal'><b>Proposal — nothing written yet</b><div id='files'></div><div id='cmds'></div>",
       "<button class='primary' id='approveAll'>Approve all files</button>",
@@ -1882,6 +2106,9 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
       " else if(m.type==='assistant'){ if(currentBubble && (currentBubble.textContent==='Thinking…' || currentBubble.textContent==='')){ currentBubble.remove(); } currentBubble=null; addMsg(m.text,'ai'); }",
       " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",
+      " else if(m.type==='sessions'){ var list=document.getElementById('sessionList'); list.innerHTML=''; if(!m.sessions || !m.sessions.length){ list.textContent='No past chats yet.'; } else { m.sessions.forEach(function(s){ var row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:4px 0'; var b=document.createElement('button'); b.className='small'; b.style.cssText='flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; b.textContent=s.title+' ('+s.count+')'; b.addEventListener('click', function(){ vscode.postMessage({type:'openSession', id:s.id}); }); row.appendChild(b); var d=document.createElement('button'); d.className='small'; d.textContent='✕'; d.title='Delete this chat'; d.addEventListener('click', function(){ vscode.postMessage({type:'deleteSession', id:s.id}); }); row.appendChild(d); list.appendChild(row); }); } }",
+      " else if(m.type==='context'){ var fill=document.getElementById('ctxFill'); var txt=document.getElementById('ctxText'); var sum=document.getElementById('ctxSummary'); if(fill){ fill.style.width=m.pct+'%'; fill.style.background = m.pct>=90 ? '#ef4444' : (m.pct>=70 ? '#f59e0b' : '#2dd4bf'); } if(txt){ txt.textContent=m.tokens+' / '+m.window+' tokens ('+m.pct+'%)'; } if(sum){ sum.textContent = m.summaryCount ? m.summaryCount+' older message(s) summarised and kept in context.' : ''; } }",
+      " else if(m.type==='restoreHistory'){ document.getElementById('chat').innerHTML=''; (m.messages||[]).forEach(function(msg){ addMsg(msg.content, msg.role==='user' ? 'user' : 'ai'); }); currentBubble=null; }",
       " else if(m.type==='setupStatus'){ document.getElementById('setupStatus').textContent=m.text; } else if(m.type==='showChat'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; } else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
       " else if(m.type==='prefill'){ document.getElementById('input').value=m.text; mode=m.mode||'ask'; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); send(); }",
       " else if(m.type==='setMode'){ mode=m.mode; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); }",

@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.25-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.27-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.25, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.27, live on Open VSX |
 | **Editor** | Antigravity |
 | **Downloads** | 2,328 on Open VSX (4 Nov 2026), 2 reviews averaging 5.0 |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
@@ -119,6 +119,16 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 Type `/skills` any time to see the list again. Example: `/review look at this function and tell me what is wrong`
 
 You can also export a whole chat: press **Export chat** in the panel (or run "LocalNest: Export Chat to Markdown"). It opens as a document for you to save — nothing is written to disk automatically.
+
+## Saved chats, context meter, your own skills and rules
+
+**Saved chats.** Every thread is saved automatically, with a title taken from your first message. The panel shows a **Past chats** list — tap any chat to reopen it in full, or ✕ to delete it. Closing the panel no longer loses a thread: when the panel reopens, your current chat is replayed back into it. You can also run "LocalNest: Reopen a Past Chat" from the Command Palette. A new chat does not delete old ones, and New Chat only clears the current thread.
+
+**Context meter + auto-summary.** Below the Past chats list, a **Context used** bar shows, live, how much of the model's context window your history + system prompt are using (in tokens and %), turning amber over 70% and red over 90%. Truncation is no longer silent: when old messages fall past the 12-message / 40,000-character limit, they are summarised first — what was asked, and the last outcome — that summary is kept, shown to you in the panel, and fed into later answers, instead of the messages just vanishing. The summary works offline (no model call needed for it).
+
+**Your own skills.** Add a file `.localnest/skills/<name>.md` in your project — first line `# description`, the rest is the skill prompt. Then use it like any built-in: `/<name> your task`. Custom skills override built-ins with the same name, and `/skills` lists both built-ins and yours.
+
+**Project rules.** Add `.localnest/rules.md` in your project (or use an existing `AGENTS.md`, `.cursorrules`, or `.github/copilot-instructions.md` — checked in that order). Its contents are loaded for every answer in that project and override generic style. The panel tells you on open which rules file, if any, was loaded.
 
 ## ⚙️ How it works
 

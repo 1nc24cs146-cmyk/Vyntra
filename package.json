@@ -150,6 +150,10 @@
       {
         "command": "localNest.exportChat",
         "title": "LocalNest: Export Chat to Markdown"
+      },
+      {
+        "command": "localNest.listSessions",
+        "title": "LocalNest: Reopen a Past Chat"
       }
     ],
     "configuration": {
@@ -406,7 +410,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.25",
+  "version": "0.9.27",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
