@@ -23,12 +23,13 @@
 
 | | |
 |---|---|
-| **Extension** | `nitinkumarhiremath.vyntra` — v0.9.25 |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.25, live on Open VSX |
 | **Editor** | Antigravity |
+| **Downloads** | 2,328 on Open VSX (4 Nov 2026), 2 reviews averaging 5.0 |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
 | **Review rule** | Nothing is written until you approve it — Ask and Plan never write at all |
-| **Also published as** | LocalNest (`localnest.localnest-antigravity`) — the same extension with LocalNest branding, live on Open VSX |
+| **Also built as** | Vyntra (`nitinkumarhiremath.vyntra`) — the same code with Vyntra branding; that listing is currently down |
 | **License** | MIT |
 
 You ask it a question, plan a change, or build a whole app — and it never writes a file until you have reviewed and approved it.
