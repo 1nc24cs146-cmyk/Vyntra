@@ -74,6 +74,26 @@ If Ollama is already installed, Vyntra will also try to start it automatically w
 
 You can switch modes at any time. Ask and Plan are safe to use freely — they cannot change a file, even by accident.
 
+## Skills
+
+Type a skill at the start of your message, in any mode, with your local Ollama model — no key, no extra install:
+
+| Skill | What it does |
+|---|---|
+| `/review` | Reviews code for bugs, security, performance and style, grouped Critical / Major / Minor |
+| `/test` | Generates tests for the code you give, main path plus edge and failure cases |
+| `/fix` | Explains the cause in a line or two, then gives the corrected code |
+| `/explain` | Explains code in simple steps, then technical detail |
+| `/docs` | Writes documentation / README for the code or project |
+| `/refactor` | Refactors for readability without changing behaviour |
+| `/commit` | Writes a conventional-commit message for a change you describe |
+| `/security` | Security audit: SQLi, XSS, secrets, weak crypto, SSRF, missing auth, and more, each with a risk level and a secure fix |
+| `/summarize` | Summarises a file, project or workspace |
+
+Type `/skills` any time to see the list again. Example: `/review look at this function and tell me what is wrong`
+
+You can also export a whole chat: press **Export chat** in the panel (or run "LocalNest: Export Chat to Markdown"). It opens as a document for you to save — nothing is written to disk automatically.
+
 ## How it works
 
 1. **You give a task.** Type it in the panel, in any mode, in any programming language.

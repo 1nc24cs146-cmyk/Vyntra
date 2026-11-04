@@ -146,6 +146,10 @@
       {
         "command": "localNest.newConversation",
         "title": "Vyntra: New Conversation"
+      },
+      {
+        "command": "localNest.exportChat",
+        "title": "LocalNest: Export Chat to Markdown"
       }
     ],
     "configuration": {
@@ -402,7 +406,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.22",
+  "version": "0.9.25",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

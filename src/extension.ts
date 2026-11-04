@@ -241,6 +241,13 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage("Vyntra: OpenAI-compatible API key saved securely.");
       await refreshStatus(false);
     }),
+    vscode.commands.registerCommand("localNest.exportChat", async () => {
+      if (!conversationHistory.length) { vscode.window.showInformationMessage("LocalNest: nothing to export yet — chat first."); return; }
+      const md = "# LocalNest chat export\n\n" + conversationHistory.map((m) => (m.role === "user" ? "## You\n\n" : "## LocalNest\n\n") + m.content).join("\n\n");
+      const doc = await vscode.workspace.openTextDocument({ content: md, language: "markdown" });
+      await vscode.window.showTextDocument(doc, { preview: false });
+      vscode.window.showInformationMessage("LocalNest: chat opened as a document — save it with Ctrl+S / Cmd+S. Nothing was written to disk automatically.");
+    }),
     vscode.commands.registerCommand("localNest.newChat", async () => {
       clearConversation();
     }),
@@ -555,6 +562,7 @@ async function downloadOllamaModel(model: string): Promise<void> {
       });
     });
     downloadingModel = "";
+    userPickedDownloadModel = null;
     view?.webview.postMessage({ text: "Downloaded " + model + " — opening chat now.", type: "setupStatus" });
     await vscode.workspace.getConfiguration("localNest").update("model", model, vscode.ConfigurationTarget.Global);
     await refreshStatus(false);
@@ -793,8 +801,10 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
     // Whichever model the user pulled on their desktop is the model to use:
     // if the saved model is not among the installed models, switch to the
     // first installed one instead of failing on a model that was never pulled.
+    // EXCEPT when the user just picked a model to download — then the pick
+    // must stay selected so Download pulls that model, not the installed one.
     let effectiveModel = cfg.model;
-    if (models.length && !models.includes(effectiveModel)) {
+    if (models.length && !models.includes(effectiveModel) && userPickedDownloadModel !== effectiveModel) {
       effectiveModel = models.includes("qwen2.5-coder:7b") ? "qwen2.5-coder:7b" : models[0];
       await vscode.workspace.getConfiguration("localNest").update("model", effectiveModel, vscode.ConfigurationTarget.Global);
     }
@@ -817,15 +827,40 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
   }
 }
 
-function systemPrompt(mode: Mode): string {
+
+// --- Built-in skills (0.9.25) ---
+// A skill is a slash command typed at the start of a chat message, e.g.
+// "/review explain this function". It does not need a model, a key, or a
+// separate install — it just changes what the model is asked to do, and it
+// works with the user's local Ollama model only.
+type Skill = { description: string; prompt: string };
+const SKILLS: Record<string, Skill> = {
+  review: { description: "Review code for bugs, security, performance and style", prompt: "You are doing a CODE REVIEW. Group findings as Critical / Major / Minor, each with the file or code it refers to and a concrete fix suggestion. Do not rewrite whole files unless the user asked for a rewrite." },
+  test: { description: "Generate tests for the given code", prompt: "Generate TESTS for the code given. Cover the main path, edge cases and failure cases. Use the project's own test style if the workspace context shows one, otherwise a plain, runnable test file. Output code in code blocks; in Agent/Build mode output as FILE blocks for review." },
+  fix: { description: "Fix bugs / diagnostics in the given code", prompt: "FIX the bug or diagnostic in the code given. Explain the cause in one or two lines first, then give the corrected code. Do not change unrelated behaviour." },
+  explain: { description: "Explain code in simple steps", prompt: "EXPLAIN the code given in simple steps: what it does, how it works, and its edge cases. Use plain language first, then technical detail. Do not rewrite the code unless asked." },
+  docs: { description: "Write documentation / README for the given code or project", prompt: "Write DOCUMENTATION for the code or project given: what it does, how to run it, its main files and commands, and an example. Keep it clear and short, in Markdown." },
+  refactor: { description: "Refactor code without changing what it does", prompt: "REFACTOR the code given for readability and maintainability, without changing its behaviour. Keep every public name and output the same unless the user asked otherwise. Say what you changed and why." },
+  commit: { description: "Write a commit message for a described change", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. If no change is described, say what information is missing instead of inventing one." },
+  security: { description: "Security audit: SQLi, XSS, secrets, auth, crypto, SSRF, etc.", prompt: "Do a SECURITY AUDIT of the code given. Check SQL injection, command injection, XSS, hardcoded secrets, weak crypto, insecure random, unsafe deserialisation, path traversal, SSRF, debug mode and missing auth. Give each finding a risk level (Critical/High/Medium/Low), the risky code, and a secure fix. If nothing is risky, say so plainly." },
+  summarize: { description: "Summarise a file, project or workspace", prompt: "SUMMARISE what was given: purpose, main parts, how they fit together, and anything important or risky. Keep it short and structured. Do not invent files or features that are not in the context." },
+};
+function skillsHelpText(): string {
+  return "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
+}
+
+function systemPrompt(mode: Mode, skillPrompt?: string): string {
   const universal =
     "You are Vyntra, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
     platformInfo() +
-    " SECURITY (always, especially for websites): write secure code by default — escape/sanitise all user input, never insert user data with innerHTML (use textContent / DOM creation), add a Content-Security-Policy meta tag to web pages, never put API keys, passwords or secrets in client code, validate input on every form, use parameterised queries / prepared statements for databases, hash passwords (never store plain text), use HTTPS links only, and add a short SECURITY note in the README naming what was secured. " +
-    " DECISIONS: small decisions (language, file names, colours, layout, library choice for a small task) — decide them yourself at once, do not ask, and say what you decided in the README/proposal. Big decisions (a complete/full project, database choice, login/auth design, payments, hosting/deployment, architecture) — if the user has not already chosen, ask ONCE with 2-3 options and a clearly marked recommended option, then wait for their answer; if they answer 'you decide' / 'anything' / 'do it', go with the recommended option and say so.";
+    " SECURITY (always, especially for websites): write secure code by default — escape/sanitise all user input, never insert user data with innerHTML (use textContent / DOM creation), add a Content-Security-Policy meta tag to web pages, never put API keys, passwords or secrets in client code, validate input on every form, use parameterised queries / prepared statements for databases, hash passwords (never store plain text), use HTTPS links only, and add a short SECURITY note in the README naming what was secured.";
+  const skillSection = skillPrompt ? " SKILL IN USE: " + skillPrompt + " Follow this skill above all other style rules, but still answer exactly the current request." : "";
+  const questionFirst = " RULE: answer the user's CURRENT request exactly as asked, in the mode selected. Do not change topic, do not answer a different question, do not build a different project, and do not repeat an older task from history. If the request is a question, answer that question first and directly, before any extra detail. Workspace context and older chat are background only — they must never replace the current request.";
+  const decisions = " DECISIONS (Agent/Build only): small decisions (language, file names, colours, layout, library choice for a small task) — decide them yourself at once, do not ask, and say what you decided in the README/proposal. Big decisions (a complete/full project, database choice, login/auth design, payments, hosting/deployment, architecture) — if the user has not already chosen, ask ONCE with 2-3 options and a clearly marked recommended option, then wait for their answer; if they answer 'you decide' / 'anything' / 'do it', go with the recommended option and say so.";
   if (mode === "plan") {
     return [
-      universal,
+      universal + skillSection + questionFirst,
+      "Plan ONLY what the user asked for in the current request — nothing else.",
       "You never claim a change has been made.",
       "Produce ONLY a plan, in this shape:",
       "Goal (one line)",
@@ -837,8 +872,9 @@ function systemPrompt(mode: Mode): string {
   }
   if (mode === "agent") {
     return [
-      universal,
+      universal + skillSection + questionFirst + decisions,
       "Propose changes; the user approves each one before anything is written.",
+      "If the user asked a question or for an explanation (not a change), answer it in plain text — do NOT force it into FILE blocks.",
       "If a change is needed, output ONLY this format, nothing else before or after:",
       "### FILE: path/to/file.ext",
       "```language",
@@ -855,8 +891,10 @@ function systemPrompt(mode: Mode): string {
   }
   if (mode === "build") {
     return [
-      universal,
+      universal + skillSection + questionFirst + decisions,
       "You build complete, working apps in ANY language the user names.",
+      "Build EXACTLY what the user asked for in the current request — same topic, same language, same features. Do not substitute a different app.",
+      "If the user asked a question or for an explanation (not a build), answer it in plain text — do NOT force it into FILE blocks.",
       "The user wants a whole website or app. Build it fully — do not stop at a description, a skeleton, or TODO placeholders.",
       "Output ONLY this format, nothing else before or after:",
       "### FILE: index.html",
@@ -875,8 +913,9 @@ function systemPrompt(mode: Mode): string {
     ].join("\n");
   }
   return [
-    universal,
+    universal + skillSection + questionFirst,
     "Answer ANY question the user asks — coding or general, about this workspace or not, in any programming language they ask for.",
+    "Answer the exact question asked first, directly and completely. Do not turn a question into a project build unless the user asked for one.",
     "Use the workspace context when it is relevant and cite file paths then. When it is not relevant, answer from your own knowledge and say so.",
     "Use code blocks for code. Be direct and complete: give the answer, the explanation, and a working example where one helps.",
     "Do not invent functions, files or APIs that are not in the context when you claim they are in this workspace. If you are unsure, say what is missing instead of guessing."
@@ -910,6 +949,10 @@ function autoDecisionNote(text: string): string {
   return "Auto-decided (small decision, no question asked): language " + langName + ", plain self-contained structure, local storage for persistence, secure defaults (escaped user input, CSP for web pages, no secrets in client code).";
 }
 let pendingBigDecision: { recommendation: string; text: string } | null = null;
+// Model the user just picked in the dropdown to download. refreshStatus must
+// NOT auto-switch this back to an already-installed model, or the pick
+// snaps back and Download pulls the wrong (already installed) model.
+let userPickedDownloadModel: string | null = null;
 
 // Only inspect the workspace when the user actually asks for it — a
 // mention of the project/files, an @ mention, a file path/extension, or
@@ -928,6 +971,28 @@ function needsWorkspaceContext(text: string): boolean {
   return false;
 }
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
+  // Slash skills: "/review ..." etc. Handled before anything else, so a
+  // skill never gets mistaken for a normal question, and /skills lists them.
+  const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
+  let skillPrompt: string | undefined;
+  if (slash) {
+    const name = slash[1].toLowerCase();
+    if (name === "skills" || name === "help") {
+      view?.webview.postMessage({ text: skillsHelpText(), type: "assistant" });
+      return;
+    }
+    const skill = SKILLS[name];
+    if (!skill) {
+      view?.webview.postMessage({ text: "Unknown skill '/" + name + "'.\n\n" + skillsHelpText(), type: "assistant" });
+      return;
+    }
+    if (!slash[2].trim()) {
+      view?.webview.postMessage({ text: "Usage: /" + name + " <your code, file, or question>\n" + skill.description + "\n\nExample: /" + name + " explain this function", type: "assistant" });
+      return;
+    }
+    skillPrompt = skill.prompt;
+    text = slash[2].trim();
+  }
   const cfg = getConfig();
   if (!cfg.chatMemoryEnabled) { conversationHistory = []; }
   currentRequestRoot = buildTargetUri(text, mode);
@@ -1019,14 +1084,15 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   }
 
   const retrieved = cfg.chatMemoryEnabled ? retrieveOlderChats(text, olderChats, cfg.chatMemoryResultCount, cfg.chatMemoryRetrievedCharacters) : [];
-  const olderSection = retrieved.length ? "\n\nOlder chat retrieved (lexical match, not current history):\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
+  const olderSection = retrieved.length ? "\n\nOlder chat — BACKGROUND ONLY, do NOT answer these instead of the current request:\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
+  const modeNote = (mode === "agent" || mode === "build") ? "\n" + autoNote : "";
   const userTurn: LlmMessage = {
-    content: "Workspace context:\n" + ctx.summary + "\n\n" + contextPrompt + "\n\nUser request:\n" + text + langNote + olderSection + "\n" + platformInfo() + "\n" + autoNote,
+    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + olderSection + "\n" + platformInfo() + modeNote,
     role: "user"
   };
   conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
   const messages: LlmMessage[] = [
-    { content: systemPrompt(mode), role: "system" },
+    { content: systemPrompt(mode, skillPrompt), role: "system" },
     ...conversationHistory
   ];
 
@@ -1593,6 +1659,13 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         view?.webview.postMessage({ mode: msg.mode, type: "setMode" });
       } else if (msg.type === "stop") {
         stopGeneration();
+      } else if (msg.type === "exportChat") {
+        if (!conversationHistory.length) { view?.webview.postMessage({ text: "Nothing to export yet — chat first.", type: "assistant" }); }
+        else {
+          const md = "# LocalNest chat export\n\n" + conversationHistory.map((m) => (m.role === "user" ? "## You\n\n" : "## LocalNest\n\n") + m.content).join("\n\n");
+          const doc = await vscode.workspace.openTextDocument({ content: md, language: "markdown" });
+          await vscode.window.showTextDocument(doc, { preview: false });
+        }
       } else if (msg.type === "newChat") {
         clearConversation();
       } else if (msg.type === "setOpenAIKey") {
@@ -1703,8 +1776,13 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       } else if (msg.type === "setModel") {
         const cfg = vscode.workspace.getConfiguration("localNest");
         await cfg.update("model", String(msg.model), vscode.ConfigurationTarget.Global);
-        view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "assistant" });
-        view?.webview.postMessage({ text: "Model set to " + String(msg.model) + ".", type: "setupStatus" });
+        // Remember the pick BEFORE refreshStatus, so refresh does not snap it back.
+        try {
+          const installedNow = await listModels(getConfig().host);
+          userPickedDownloadModel = installedNow.includes(String(msg.model)) ? null : String(msg.model);
+        } catch { userPickedDownloadModel = String(msg.model); }
+        view?.webview.postMessage({ text: "Model set to " + String(msg.model) + (userPickedDownloadModel ? " — not downloaded yet, press Download selected model." : ".") , type: "assistant" });
+        view?.webview.postMessage({ text: "Model set to " + String(msg.model) + (userPickedDownloadModel ? " — not downloaded yet, press Download selected model." : ".") , type: "setupStatus" });
         await refreshStatus(false);
         // If the user picked a model that is already on this system, open
         // chat straight away — no extra Continue press needed.
@@ -1752,7 +1830,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
       "<div class='autorow'><span>Auto</span><span class='local'>LOCAL</span><span>▾</span><span id='host' style='color:var(--vscode-descriptionForeground)'>checking…</span></div>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button><button id='fastBtn' title='Fast mode: smaller context, faster answers'>Fast</button></div>",
-      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.</span></div>",
+      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.<br>Skills: /review /test /fix /explain /docs /refactor /commit /security /summarize — type /skills for the list.</span></div>",
       "<div id='setup'>",
       "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat.</p><p style='font-size:12px;color:var(--vscode-descriptionForeground)'>Speed tip: on a normal laptop without a GPU, a 3B model (llama3.2:3b, phi3:mini) answers much faster than a 7B model. The first answer after a download is always slowest — the model has to load into memory first.</p>",
       "<label>Available Ollama models</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
@@ -1762,7 +1840,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<button class='small' id='installOllama'>Install Ollama (if terminal says ollama is not recognized)</button>",
       "</div>",
       "<div id='chatStage' style='display:none;flex:1;flex-direction:column;min-height:0'>",
-      "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='undo'>Undo last apply</button></div>",
+      "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='exportChat'>Export chat</button><button class='small' id='undo'>Undo last apply</button></div>",
       "<button class='small' id='buildPlan' style='display:none;margin:8px 12px'>Build this plan (Agent mode)</button>",
       "<div id='proposal'><b>Proposal — nothing written yet</b><div id='files'></div><div id='cmds'></div>",
       "<button class='primary' id='approveAll'>Approve all files</button>",
@@ -1780,6 +1858,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "function send(){ var t=document.getElementById('input').value.trim(); if(!t) return; document.getElementById('input').value=''; if(document.getElementById('chatStage').style.display==='none'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; } addMsg(t,'user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); vscode.postMessage({type:'chat', mode:mode, text:t, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); }",
       "document.getElementById('stopBtn').addEventListener('click', function(){ vscode.postMessage({type:'stop'}); });",
       "document.getElementById('newChat').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
+      "document.getElementById('exportChat').addEventListener('click', function(){ vscode.postMessage({type:'exportChat'}); });",
       "document.getElementById('newChatTop').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
       "document.getElementById('undo').addEventListener('click', function(){ vscode.postMessage({type:'undo'}); });",
       "document.getElementById('fastBtn').addEventListener('click', function(e){ var cb=document.getElementById('lowBandwidth'); cb.checked=!cb.checked; e.target.classList.toggle('on', cb.checked); });",
