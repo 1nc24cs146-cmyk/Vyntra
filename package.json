@@ -154,6 +154,10 @@
       {
         "command": "localNest.listSessions",
         "title": "LocalNest: Reopen a Past Chat"
+      },
+      {
+        "command": "localNest.listLearnedAnswers",
+        "title": "LocalNest: List Learned Answers"
       }
     ],
     "configuration": {
@@ -410,7 +414,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.27",
+  "version": "0.9.32",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

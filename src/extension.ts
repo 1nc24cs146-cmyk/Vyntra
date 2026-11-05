@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { exec, spawn } from "child_process";
 import { checkHealth, chatStream, listModels } from "./ollama";
 import { collectContext, contextToPrompt } from "./context";
-import { applyUnifiedDiff, isDangerousCommand, parseDiffProposal, parseProposal, ProposedFile, Proposal } from "./proposal";
+import { applyUnifiedDiff, isDangerousCommand, isUnsafeProposalPath, parseDiffProposal, parseProposal, ProposedFile, Proposal } from "./proposal";
 import { estimateTokens, retrieveOlderChats, trimHistory, LlmMessage } from "./llm";
 import { checkOpenAi, openAiChatStream } from "./openai";
 import { buildTemplateApp } from "./templates";
@@ -37,6 +37,56 @@ interface AgentState {
   task: string;
 }
 let agentState: AgentState | null = null;
+let lastChatRequest: { autoApply: boolean; majorFlag: boolean; mode: Mode; text: string } | null = null;
+interface LearnedAnswer { answer: string; createdAt: number; question: string; }
+let learnedAnswers: LearnedAnswer[] = [];
+function loadLearnedAnswers() {
+  try {
+    const s = extContext?.globalState.get<LearnedAnswer[]>("localNest.learnedAnswers", []);
+    if (Array.isArray(s)) { learnedAnswers = s.filter((x) => x && typeof x.question === "string" && typeof x.answer === "string"); }
+  } catch { /* start with none */ }
+}
+function saveLearnedAnswers() {
+  try { void extContext?.globalState.update("localNest.learnedAnswers", learnedAnswers.slice(-100)); } catch { /* best-effort */ }
+}
+function normQ(q: string): string { return q.toLowerCase().replace(/\s+/g, " ").trim(); }
+function storeLearnedAnswer(question: string, answer: string): string {
+  const q = question.trim().slice(0, 500);
+  const a = answer.trim().slice(0, 4000);
+  if (!q || !a) { return ""; }
+  const idx = learnedAnswers.findIndex((x) => normQ(x.question) === normQ(q));
+  if (idx >= 0) { learnedAnswers[idx] = { answer: a, createdAt: Date.now(), question: q }; }
+  else { learnedAnswers.push({ answer: a, createdAt: Date.now(), question: q }); learnedAnswers = learnedAnswers.slice(-100); }
+  saveLearnedAnswers();
+  return q;
+}
+function findLearnedAnswers(query: string): LearnedAnswer[] {
+  const tokens = query.toLowerCase().split(/[^a-z0-9_]+/).filter((x) => x.length > 2);
+  if (!tokens.length || !learnedAnswers.length) { return []; }
+  const nq = normQ(query);
+  const scored = learnedAnswers.map((x) => {
+    let score = 0;
+    if (normQ(x.question) === nq) { score += 100; }
+    const lower = x.question.toLowerCase();
+    for (const tok of tokens) { if (lower.includes(tok)) { score += 1; } }
+    return { score, x };
+  }).filter((s) => s.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+  return scored.map((s) => s.x);
+}
+function parseTaughtQA(text: string): { answer: string; question: string } | null {
+  // "Q: ... A: ..." / "Question: ... Answer: ..." — a user teaching the
+  // extension, not asking it. Stored, not sent to the model.
+  const m = text.trim().match(/^(?:Q|Question)\s*:\s*(.+?)\s*(?:A|Answer)\s*:\s*(.+)$/is);
+  if (!m) { return null; }
+  return { answer: m[2].trim(), question: m[1].trim() };
+}
+function parseLearnArg(rest: string): { answer: string; question: string } | null {
+  for (const sep of [" | ", " :: ", "\nAnswer:", "\nA:", " Answer: "]) {
+    const i = rest.indexOf(sep);
+    if (i > 0) { return { answer: rest.slice(i + sep.length).trim(), question: rest.slice(0, i).trim() }; }
+  }
+  return null;
+}
 let lastAppliedFiles: string[] = [];
 let conversationHistory: LlmMessage[] = [];
 let olderChats: LlmMessage[] = [];
@@ -108,8 +158,18 @@ let contextSummaryCount = 0;
 let lastTrimNotice = "";
 function sessionTitleFrom(messages: LlmMessage[]): string {
   const firstUser = messages.find((m) => m.role === "user");
-  const raw = (firstUser ? firstUser.content : "New chat").replace(/\s+/g, " ").trim();
+  // Use displayContent: conversationHistory stores the constructed prompt
+  // ("MODE: build / CURRENT USER REQUEST ..."), but a session must be
+  // named after what the user actually typed, not that internal prompt.
+  const raw = (firstUser ? displayContent(firstUser) : "New chat").replace(/\s+/g, " ").trim();
   return raw.length > 48 ? raw.slice(0, 48) + "…" : (raw || "New chat");
+}
+function retitleBadSessions() {
+  for (const s of chatSessions) {
+    if (s.title.startsWith("MODE:") || s.title.startsWith("MODE")) {
+      s.title = sessionTitleFrom(s.messages);
+    }
+  }
 }
 function saveSessions() {
   try {
@@ -122,7 +182,7 @@ function saveSessions() {
 function loadSessions() {
   try {
     const s = memoryState().get<ChatSession[]>("localNest.chatSessions", []);
-    if (Array.isArray(s)) { chatSessions = s.filter((x) => x && typeof x.id === "string" && Array.isArray(x.messages)); }
+    if (Array.isArray(s)) { chatSessions = s.filter((x) => x && typeof x.id === "string" && Array.isArray(x.messages)); retitleBadSessions(); }
     const cur = memoryState().get<string | null>("localNest.currentSessionId", null);
     currentSessionId = typeof cur === "string" ? cur : null;
     contextSummary = memoryState().get<string>("localNest.contextSummary", "") || "";
@@ -149,7 +209,7 @@ function saveCurrentSession() {
   if (!s) { return; }
   s.messages = [...conversationHistory];
   s.updatedAt = Date.now();
-  if (s.title === "New chat" || !s.title) { s.title = sessionTitleFrom(conversationHistory); }
+  if (s.title === "New chat" || !s.title || s.title.startsWith("MODE:")) { s.title = sessionTitleFrom(conversationHistory); }
   saveSessions();
 }
 function ensureSession() {
@@ -172,7 +232,7 @@ function startNewSession() {
   saveSessions();
   postSessions();
   view?.webview.postMessage({ messages: [], type: "restoreHistory" });
-  view?.webview.postMessage({ text: "New chat started — past chats are still in Past chats below.", type: "assistant" });
+  view?.webview.postMessage({ text: "New chat started — past chats are still in Past chats at the top.", type: "assistant" });
 }
 function openSession(id: string) {
   const s = chatSessions.find((x) => x.id === id);
@@ -183,7 +243,7 @@ function openSession(id: string) {
   saveChatMemory();
   saveSessions();
   postSessions();
-  view?.webview.postMessage({ messages: s.messages.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" });
+  view?.webview.postMessage({ messages: displayMessages(s.messages), type: "restoreHistory" });
   view?.webview.postMessage({ text: "Reopened chat: " + s.title + " (" + s.messages.length + " message(s)).", type: "assistant" });
   postContext("ask");
 }
@@ -199,11 +259,34 @@ function deleteSession(id: string) {
   postSessions();
   if (currentSessionId) {
     const cur = chatSessions.find((x) => x.id === currentSessionId);
-    if (cur) { view?.webview.postMessage({ messages: cur.messages.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" }); }
+    if (cur) { view?.webview.postMessage({ messages: displayMessages(cur.messages), type: "restoreHistory" }); }
   } else {
     view?.webview.postMessage({ messages: [], type: "restoreHistory" });
   }
 }
+
+function displayContent(m: LlmMessage): string {
+  // conversationHistory stores the constructed prompt (MODE + workspace
+  // context + request). When replaying a chat, show only the user's
+  // original text, never that internal prompt — otherwise the panel
+  // shows a "MODE: build CURRENT USER REQUEST ..." bubble instead of
+  // what the user actually typed.
+  if (m.role !== "user") { return m.content; }
+  const marker = "CURRENT USER REQUEST";
+  const idx = m.content.indexOf(marker);
+  if (idx < 0) { return m.content; }
+  const after = m.content.slice(idx);
+  const nl = after.indexOf("\n");
+  if (nl < 0) { return m.content; }
+  let rest = after.slice(nl + 1);
+  const cut = rest.indexOf("\n\nWorkspace context");
+  if (cut >= 0) { rest = rest.slice(0, cut); }
+  return rest.trim() || m.content;
+}
+function displayMessages(msgs: LlmMessage[]) {
+  return msgs.map((m) => ({ content: displayContent(m), role: m.role }));
+}
+
 function postSessions() {
   view?.webview.postMessage({ sessions: chatSessions.map((s) => ({ count: s.messages.length, id: s.id, title: s.title, updatedAt: s.updatedAt })), type: "sessions" });
 }
@@ -283,7 +366,7 @@ async function skillsHelpTextFull(): Promise<string> {
   const built = "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n");
   const customText = Object.keys(custom).length ? "\n\nYour skills (.localnest/skills/*.md):\n" + Object.entries(custom).map(([n, s]) => "/" + n + " — " + s.description).join("\n") : "\n\nYour skills: none yet. Add a file .localnest/skills/<name>.md in your project — first line '# description', rest is the skill prompt.";
   const rules = await loadProjectRules();
-  return built + customText + (rules ? "\n\nProject rules loaded from " + rules.file + "." : "\n\nProject rules: none found. Add .localnest/rules.md or AGENTS.md to your project to set them.") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
+  return built + customText + (rules ? "\n\nProject rules loaded from " + rules.file + "." : "\n\nProject rules: none found. Add .localnest/rules.md or AGENTS.md to your project to set them.") + (learnedAnswers.length ? "\n\nLearned answers: " + learnedAnswers.length + " stored — I use them first for matching questions. See /learned." : "\n\nLearned answers: none yet. Teach one with /learn <question> | <answer>.") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -291,6 +374,7 @@ export function activate(context: vscode.ExtensionContext) {
   secretStorage = context.secrets;
   loadChatMemory();
   loadSessions();
+  loadLearnedAnswers();
   statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   statusBar.command = "localNest.refreshOllama";
   statusBar.text = "○ Ollama: checking…";
@@ -666,6 +750,10 @@ function selfTestText(): string {
   checks.push("applyUnifiedDiff -> " + (diffed && diffed.includes("line2-fixed") ? "PASS" : "FAIL"));
   const retrieved = retrieveOlderChats("todo database", [{ content: "todo database schema", role: "user" }, { content: "unrelated weather", role: "assistant" }]);
   checks.push("retrieveOlderChats -> " + retrieved.length + " hit(s)" + (retrieved.length === 1 ? " PASS" : " FAIL"));
+  const trav = parseProposal("### FILE: ../../etc/passwd\n```txt\nsecret\n```\n### FILE: index.html\n```html\n<h1>ok</h1>\n```\n### FILE: index.html\n```html\n<h1>last</h1>\n```");
+  checks.push("parseProposal traversal blocked + duplicate deduped -> " + trav.files.length + " file(s)" + (trav.files.length === 1 && trav.files[0].content.includes("last") ? " PASS" : " FAIL"));
+  checks.push("isDangerousCommand rm -rf ~ / format C: -> " + (isDangerousCommand("rm -rf ~/") && isDangerousCommand("format C:") ? "PASS" : "FAIL"));
+  checks.push("displayContent strips internal prompt -> " + (displayContent({ content: "MODE: build\n\nCURRENT USER REQUEST — answer exactly this:\nbuild a site\n\nWorkspace context (background only):\nnone", role: "user" }) === "build a site" ? "PASS" : "FAIL"));
   return checks.join("\n");
 }
 async function tryAutoStartOllama(host: string): Promise<void> {
@@ -798,6 +886,7 @@ async function runDiagnose(includeSelfTest: boolean): Promise<void> {
     "Online: " + (online ? "yes" : "no"),
     "Workspace: " + (workspaceRootUri()?.fsPath || "none open"),
     "History: " + conversationHistory.length + " message(s) kept, " + olderChats.length + " older message(s) stored",
+    "Learned answers: " + learnedAnswers.length + " stored (used first for matching questions)",
     "Last created/updated: " + (lastAppliedFiles.join(", ") || "none"),
     "Agent steps ceiling: " + cfg.agentMaxRounds + ", temperature: " + cfg.temperature,
     "Target: " + targetKind + (targetCustom ? " (" + targetCustom + ")" : "") + ", full desktop access: " + (fullAccessEnabled ? "on" : "off")
@@ -1174,6 +1263,26 @@ function needsWorkspaceContext(text: string): boolean {
   return false;
 }
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
+  lastChatRequest = { autoApply, majorFlag, mode, text };
+  // Taught Q&A: "Q: ... A: ..." / "Question: ... Answer: ..." — store it
+  // and confirm, do not send it to the model as a question.
+  const taught = parseTaughtQA(text);
+  if (taught) {
+    const q = storeLearnedAnswer(taught.question, taught.answer);
+    view?.webview.postMessage({ text: q ? "Stored — I will use this answer first next time a similar question comes up.\nQ: " + q + "\nA: " + taught.answer.slice(0, 500) + (learnedAnswers.length ? "\n(" + learnedAnswers.length + " learned answer(s) stored in total.)" : "") : "That did not look like a complete question + answer — use: Q: <question> A: <answer>", type: "assistant" });
+    return;
+  }
+  // Correction of the last answer: "No, the correct answer is ..." —
+  // store it against the last question, so the next similar question
+  // gets the corrected answer instead of the model's wrong one.
+  if (/^(no,?|wrong,?|actually,?|correct answer is|the correct answer is)\b/i.test(text.trim()) && lastChatRequest && conversationHistory.length) {
+    const prev = [...conversationHistory].reverse().find((m) => m.role === "user");
+    if (prev) {
+      const q = storeLearnedAnswer(displayContent(prev), text.trim());
+      view?.webview.postMessage({ text: q ? "Got it — stored the corrected answer for that question, and I will use it first next time it comes up.\nQ: " + q : "Could not tell which question that corrects — teach it with: /learn <question> | <answer>", type: "assistant" });
+      return;
+    }
+  }
   // Slash skills: "/review ..." etc. Handled before anything else, so a
   // skill never gets mistaken for a normal question, and /skills lists them.
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
@@ -1185,6 +1294,24 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     const name = slash[1].toLowerCase();
     if (name === "skills" || name === "help") {
       view?.webview.postMessage({ text: await skillsHelpTextFull(), type: "assistant" });
+      return;
+    }
+    if (name === "learn") {
+      if (!slash[2].trim()) { view?.webview.postMessage({ text: "Teach me a question + answer so I use it next time:\n/learn <question> | <answer>\nExample: /learn how do I start Ollama | Run: ollama serve, then ollama pull llama3.2:3b\nOr just type: Q: <question> A: <answer>", type: "assistant" }); return; }
+      const parsed = parseLearnArg(slash[2].trim());
+      if (!parsed) { view?.webview.postMessage({ text: "I need a question and an answer separated by | — /learn <question> | <answer>", type: "assistant" }); return; }
+      const q = storeLearnedAnswer(parsed.question, parsed.answer);
+      view?.webview.postMessage({ text: q ? "Stored — I will use this answer first next time a similar question comes up. (" + learnedAnswers.length + " learned answer(s) stored in total.)" : "That did not look like a complete question + answer.", type: "assistant" }); return;
+    }
+    if (name === "learned") {
+      view?.webview.postMessage({ text: learnedAnswers.length ? "Learned answers (" + learnedAnswers.length + " stored — I use these first for matching questions):\n" + learnedAnswers.map((x, i) => (i + 1) + ". Q: " + x.question + "\n   A: " + x.answer.slice(0, 200) + (x.answer.length > 200 ? "…" : "")).join("\n") + "\n\nForget one with: /forget-learned <number>" : "No learned answers stored yet. Teach one with: /learn <question> | <answer> — or type: Q: <question> A: <answer>", type: "assistant" }); return;
+    }
+    if (name === "forget-learned" || name === "forgetlearned") {
+      const arg = slash[2].trim();
+      const n = parseInt(arg, 10);
+      if (!isNaN(n) && n >= 1 && n <= learnedAnswers.length) { const removed = learnedAnswers.splice(n - 1, 1)[0]; saveLearnedAnswers(); view?.webview.postMessage({ text: "Forgot learned answer #" + n + ": " + removed.question, type: "assistant" }); }
+      else if (arg) { const before = learnedAnswers.length; learnedAnswers = learnedAnswers.filter((x) => normQ(x.question) !== normQ(arg)); if (learnedAnswers.length < before) { saveLearnedAnswers(); view?.webview.postMessage({ text: "Forgot the learned answer for: " + arg, type: "assistant" }); } else { view?.webview.postMessage({ text: "No learned answer matches that — see /learned for the list.", type: "assistant" }); } }
+      else { view?.webview.postMessage({ text: "Usage: /forget-learned <number> — see /learned for the numbers.", type: "assistant" }); }
       return;
     }
     const skill = allSkills[name];
@@ -1292,8 +1419,13 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   const retrieved = cfg.chatMemoryEnabled ? retrieveOlderChats(text, olderChats, cfg.chatMemoryResultCount, cfg.chatMemoryRetrievedCharacters) : [];
   const olderSection = retrieved.length ? "\n\nOlder chat — BACKGROUND ONLY, do NOT answer these instead of the current request:\n" + retrieved.map((m) => m.role + ": " + m.content).join("\n---\n") : "";
   const modeNote = (mode === "agent" || mode === "build") ? "\n" + autoNote : "";
+  const learned = findLearnedAnswers(text);
+  if (learned.length) {
+    view?.webview.postMessage({ text: "Using your learned answer for a matching question — " + learned.map((x) => "\"" + x.question + "\"").join(", ") + ".", type: "assistant" });
+  }
+  const learnedSection = learned.length ? "\n\nLearned answers from you (use these FIRST — they are your own correct answers for this type of question, and they override the model's guess):\n" + learned.map((x) => "Q: " + x.question + "\nA: " + x.answer).join("\n---\n") : "";
   const userTurn: LlmMessage = {
-    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + (contextSummary ? "\n\nSummary of earlier chat (already trimmed, use this instead of the dropped messages):\n" + contextSummary : "") + olderSection + "\n" + platformInfo() + modeNote,
+    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + learnedSection + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + (contextSummary ? "\n\nSummary of earlier chat (already trimmed, use this instead of the dropped messages):\n" + contextSummary : "") + olderSection + "\n" + platformInfo() + modeNote,
     role: "user"
   };
   conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
@@ -1375,8 +1507,13 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       await deliverProposal(proposal, autoApply, "The model could not be reached on this network, so I built this from a working template instead. Check that " + (cfg.provider === "gemini" ? "your Gemini API key is set" : "Ollama is running and the model is pulled") + " for custom builds.");
       return;
     }
+    view?.webview.postMessage({ type: "streamDone" });
+    // Do not leave a half-streamed bubble or an unanswered user turn in
+    // history: the next question would otherwise inherit a broken turn.
+    conversationHistory = conversationHistory.slice(0, -1);
+    saveCurrentSession();
     view?.webview.postMessage({
-      text: "Vyntra could not reach the model: " + String(streamError?.message || streamError) + "\nCheck that " + (cfg.provider === "gemini" ? "your Gemini API key is set and gemini-3.8-flash is enabled for it" : "Ollama is running and the model `" + cfg.model + "` is pulled") + ". If you are offline, Build mode still works from templates.",
+      text: "Vyntra could not reach the model: " + String(streamError?.message || streamError) + "\nCheck that " + (cfg.provider === "gemini" ? "your Gemini API key is set and gemini-3.8-flash is enabled for it" : "Ollama is running and the model `" + cfg.model + "` is pulled") + ". If you are offline, Build mode still works from templates. Ask the same question again once it is back — nothing was saved from this failed turn.",
       type: "assistant"
     });
     return;
@@ -1416,6 +1553,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
           proposal = { commands: diffProposal.commands, files: resolved, raw: full };
         }
       }
+    }
+    if (proposal.files.length === 0 && mode === "agent" && (/###\s*FILE:/.test(full) || /diff --git/.test(full))) {
+      view?.webview.postMessage({ text: "The model tried to send files, but its file format was incomplete, so I could not extract any file safely — nothing was written. Ask again in the same words, or switch to Build mode and I will build a working version from a template.", type: "assistant" });
     }
     if (proposal.files.length > 0) {
       await deliverProposal(proposal, autoApply, mode === "build" ? "Built app ready — see the files below." : "Proposal ready below — nothing has been written yet. Review each file, then approve the ones you want. Commands, if any, run only after you press “Run approved commands”.");
@@ -1571,6 +1711,10 @@ async function deliverProposal(proposal: Proposal, autoApply: boolean, intro: st
     });
     return;
   }
+  if (!root) {
+    view?.webview.postMessage({ text: "⚠️ No project folder is open, so Approve cannot write these files yet. Open a folder (File > Open Folder), then ask again — or pick Desktop/Home/Custom as the target. The proposal below is preview-only until then.", type: "assistant" });
+    vscode.window.showWarningMessage("LocalNest: no project folder is open — Approve cannot write files until you open a folder.");
+  }
   view?.webview.postMessage({ proposal: serialiseProposal(proposal), type: "proposal" });
   const updates = proposal.files.filter((f) => f.exists).length;
   const news = proposal.files.length - updates;
@@ -1619,6 +1763,17 @@ async function applyFile(path: string): Promise<string> {
   if (!currentProposal) {
     return "No proposal is waiting.";
   }
+  if (isUnsafeProposalPath(path)) {
+    return "Refused to write " + path + ": it escapes the project folder (.. is not allowed).";
+  }
+  const _root = currentProposalRoot || workspaceRootUri();
+  if (_root && (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path))) {
+    const normRoot = _root.fsPath.replace(/\\/g, "/").replace(/\/$/, "");
+    const normPath = path.replace(/\\/g, "/");
+    if (!fullAccessEnabled && normPath !== normRoot && !normPath.startsWith(normRoot + "/")) {
+      return "Refused to write " + path + ": it is outside the open project folder. Turn on full desktop access, or ask for a path inside the project.";
+    }
+  }
   const guardFile = currentProposal.files.find((f) => f.path === path);
   if (guardFile && Buffer.byteLength(guardFile.content, "utf8") > getConfig().agentMaxFileBytes) {
     return "Refused to write " + path + ": it exceeds the agent file-size ceiling (" + getConfig().agentMaxFileBytes + " bytes). Split it into smaller files.";
@@ -1629,7 +1784,9 @@ async function applyFile(path: string): Promise<string> {
   }
   const root = currentProposalRoot || workspaceRootUri();
   if (!root) {
-    return "No target folder — open a project folder, or pick Desktop/Home/Custom as the target.";
+    const msg = "No target folder — open a project folder first (File > Open Folder), then ask again. Nothing was written.";
+    vscode.window.showErrorMessage("LocalNest: " + msg);
+    return msg;
   }
   captureSnapshot(currentProposal.files);
   const uri = file.path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(file.path) ? vscode.Uri.file(file.path) : vscode.Uri.joinPath(root, path);
@@ -1693,7 +1850,7 @@ function runCommands(commands: string[], cwdUri?: vscode.Uri): Promise<string> {
     // Destructive commands are never run, even with full access: full
     // access means building anything, not wiping a disk. Sudo is also
     // refused because it needs a terminal password — run it yourself.
-    const destructive = commands.filter((c) => /rm\s+-rf\s+\//.test(c) || /\bmkfs\b/.test(c) || />\s*\/dev\/sd/.test(c) || /:\(\)\s*\{/.test(c) || /\bsudo\b/.test(c));
+    const destructive = commands.filter((c) => isDangerousCommand(c));
     const blocked = fullAccessEnabled ? destructive : commands.filter((c) => isDangerousCommand(c));
     if (blocked.length > 0) {
       const blockedMsg = "Refused to run blocked command(s): " + blocked.join(", ") + ". Vyntra never runs disk formatting, rm -rf / or sudo — run those yourself in a terminal if you really mean them. Everything else for building (npm/pip install, git, build, test, start a server) is allowed" + (fullAccessEnabled ? " with full desktop access on." : ", and with full access on it runs in your chosen target folder.");
@@ -1901,9 +2058,29 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         await openTargetFolder();
       } else if (msg.type === "listDesktop") {
         await listDesktopFiles();
+      } else if (msg.type === "regenerate") {
+        if (!lastChatRequest) { view?.webview.postMessage({ text: "Nothing to regenerate yet — ask something first.", type: "assistant" }); }
+        else if (!await providerOnline(getConfig()) && lastChatRequest.mode !== "build") { view?.webview.postMessage({ text: "Ollama is offline, so I cannot regenerate this answer yet. Start Ollama and press Regenerate again.", type: "assistant" }); }
+        else {
+          // Drop the last (user + assistant) turn so the regenerated turn
+          // does not duplicate the failed one in history.
+          if (conversationHistory.length && conversationHistory[conversationHistory.length - 1].role === "assistant") { conversationHistory = conversationHistory.slice(0, -1); }
+          if (conversationHistory.length && conversationHistory[conversationHistory.length - 1].role === "user") { conversationHistory = conversationHistory.slice(0, -1); }
+          saveCurrentSession();
+          view?.webview.postMessage({ messages: displayMessages(conversationHistory), type: "restoreHistory" });
+          await handleChat(lastChatRequest.mode, lastChatRequest.text, lastChatRequest.autoApply, lastChatRequest.majorFlag);
+        }
+      } else if (msg.type === "renameSession") {
+        const s = chatSessions.find((x) => x.id === String(msg.id));
+        if (!s) { view?.webview.postMessage({ text: "That past chat is gone.", type: "assistant" }); }
+        else {
+          const name = await vscode.window.showInputBox({ prompt: "Rename this past chat", value: s.title, validateInput: (v) => v.trim() ? undefined : "Give the chat a name." });
+          if (name && name.trim()) { s.title = name.trim().slice(0, 80); s.updatedAt = Date.now(); saveSessions(); postSessions(); }
+        }
       } else if (msg.type === "approveFile") {
         const result = await applyFile(String(msg.path));
         view?.webview.postMessage({ text: result, type: "assistant" });
+        if (result.startsWith("Wrote ")) { view?.webview.postMessage({ path: String(msg.path), type: "fileApproved" }); }
       } else if (msg.type === "viewProposalFile") {
         // Review before approve: open the proposed content in a side
         // editor tab (untitled, so nothing is written to disk) next to
@@ -1917,9 +2094,20 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
             view?.webview.postMessage({ text: "That file is not in the proposal.", type: "assistant" });
           } else {
             const ext = file.path.includes(".") ? file.path.slice(file.path.lastIndexOf(".") + 1) : "plaintext";
-            const doc = await vscode.workspace.openTextDocument({ content: file.content, language: ext === "js" ? "javascript" : ext === "ts" ? "typescript" : ext });
-            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
-            view?.webview.postMessage({ text: "Opened proposed " + file.path + " beside the editor for review. Approve it only if it looks right; otherwise Discard proposal.", type: "assistant" });
+            if (file.exists && file.original !== null) {
+              // Existing file: show a real diff (old vs proposed), not just
+              // the full new file — that is what review actually needs.
+              const root = currentProposalRoot || workspaceRootUri();
+              const origUri = file.path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(file.path) ? vscode.Uri.file(file.path) : (root ? vscode.Uri.joinPath(root, file.path) : vscode.Uri.file(file.path));
+              const tmpUri = vscode.Uri.file(require("os").tmpdir() + "/" + "localnest-review-" + file.path.replace(/[^A-Za-z0-9._-]/g, "_"));
+              await vscode.workspace.fs.writeFile(tmpUri, Buffer.from(file.content, "utf8"));
+              await vscode.commands.executeCommand("vscode.diff", origUri, tmpUri, "Review: " + file.path + " (proposed →)");
+              view?.webview.postMessage({ text: "Opened a diff for " + file.path + " — left is the current file, right is the proposal. Approve it only if the changes look right; otherwise Discard proposal.", type: "assistant" });
+            } else {
+              const doc = await vscode.workspace.openTextDocument({ content: file.content, language: ext === "js" ? "javascript" : ext === "ts" ? "typescript" : ext });
+              await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+              view?.webview.postMessage({ text: "Opened proposed " + file.path + " beside the editor for review. Approve it only if it looks right; otherwise Discard proposal.", type: "assistant" });
+            }
           }
         }
       } else if (msg.type === "approveAll") {
@@ -1933,6 +2121,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         }
         lastAppliedFiles = currentProposal.files.map((f) => f.path);
         view?.webview.postMessage({ text: results.join("\n"), type: "assistant" });
+        view?.webview.postMessage({ type: "proposalDone" });
         // Step 4, visible: validation AFTER accepted edits.
         // Approve-all is the explicit approval; only then does validation
         // run, and any fix it proposes goes through review again.
@@ -2011,7 +2200,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       postSessions();
       postContext("ask");
       if (conversationHistory.length) {
-        view?.webview.postMessage({ messages: conversationHistory.map((m) => ({ content: m.content, role: m.role })), type: "restoreHistory" });
+        view?.webview.postMessage({ messages: displayMessages(conversationHistory), type: "restoreHistory" });
       }
       const rules0 = await loadProjectRules();
       if (rules0) { view?.webview.postMessage({ text: "Project rules loaded from " + rules0.file + " — they will be followed for every answer in this project.", type: "assistant" }); }
@@ -2033,7 +2222,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
     return [
       "<!DOCTYPE html><html><head><meta charset='utf-8'>",
       "<style>",
-      "body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-sideBar-background);margin:0;padding:0;font-size:13px;display:flex;flex-direction:column;height:100vh}",
+      "body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-sideBar-background);margin:0;padding:0;font-size:13px;display:flex;flex-direction:column;height:100vh;overflow:hidden} #chatStage{overflow-y:auto;flex-shrink:1}",
       ".topbar{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--vscode-panel-border)} .topbar .pill{background:var(--vscode-badge-background);color:var(--vscode-badge-foreground);border-radius:12px;padding:3px 10px;font-weight:700} .topbar .spacer{flex:1} .topbar button{background:none;border:0;color:var(--vscode-foreground);cursor:pointer;font-size:14px}",
       ".head{display:flex;align-items:center;gap:10px;padding:12px 12px 4px} .head .logo{font-size:22px} .head b{font-size:16px}",
       ".autorow{display:flex;align-items:center;gap:8px;padding:6px 12px} .autorow .local{background:#0e7490;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}",
@@ -2042,13 +2231,16 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "#setup{margin:8px 12px;padding:12px;border:1px solid var(--vscode-panel-border);border-radius:12px} select,input,textarea{width:100%;box-sizing:border-box;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:8px;padding:8px}",
       "button.primary{width:100%;padding:9px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0;border-radius:8px;cursor:pointer;margin-top:8px}",
       "button.small{padding:5px 8px;margin:4px 4px 0 0;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border:1px solid var(--vscode-button-border);border-radius:6px;cursor:pointer}",
-      "#chat{flex:1;overflow-y:auto;padding:4px 12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:12px;padding:10px;margin:8px 0;max-width:92%} .msg.user{margin-left:auto;background:#0e7490;color:#fff;border-color:#0e7490} .msg.ai{margin-right:auto} .msg.error{border-left:4px solid #ef4444} .msg.error b{color:#f87171}",
-      "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin:8px 12px;display:none} code{font-family:var(--vscode-editor-font-family)}",
-      ".foot{display:flex;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:12px}",
-      ".chips{display:flex;gap:6px;flex-wrap:wrap;padding:4px 12px} .chips button{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);border:0;border-radius:12px;padding:4px 10px;cursor:pointer;font-size:12px}",
-      ".composer{padding:8px 12px 12px;border-top:1px solid var(--vscode-panel-border)} textarea{min-height:70px;resize:vertical} .sendrow{display:flex;justify-content:flex-end;margin-top:6px} .sendrow button{background:#0e7490;color:#fff;border:0;border-radius:8px;padding:8px 18px;cursor:pointer}",
+      "#chat{flex:1 1 auto;min-height:120px;overflow-y:auto;padding:4px 12px} .msg{white-space:pre-wrap;word-break:break-word;border:1px solid var(--vscode-panel-border);border-radius:12px;padding:10px;margin:8px 0;max-width:92%} .msg.user{margin-left:auto;background:#0e7490;color:#fff;border-color:#0e7490} .msg.ai{margin-right:auto} .msg.error{border-left:4px solid #ef4444} .msg.error b{color:#f87171}",
+      "#proposal{border:2px solid var(--vscode-focusBorder);border-radius:10px;padding:10px;margin:8px 12px;display:none;max-height:55vh;overflow-y:auto;flex-shrink:0;position:relative;z-index:1;background:var(--vscode-editor-background)} code{font-family:var(--vscode-editor-font-family)}",
+      ".foot{display:flex;justify-content:space-between;padding:8px 12px;border-top:1px solid var(--vscode-panel-border);color:var(--vscode-descriptionForeground);font-size:12px;flex-shrink:0;position:relative;z-index:2;background:var(--vscode-sideBar-background)}",
+      ".chips{display:flex;gap:6px;flex-wrap:wrap;padding:4px 12px;flex-shrink:0;position:relative;z-index:2;background:var(--vscode-sideBar-background)} .chips button{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);border:0;border-radius:12px;padding:4px 10px;cursor:pointer;font-size:12px}",
+      ".composer{padding:8px 12px 12px;border-top:1px solid var(--vscode-panel-border);flex-shrink:0;position:relative;z-index:2;background:var(--vscode-sideBar-background)} textarea{min-height:70px;resize:vertical} .sendrow{display:flex;justify-content:flex-end;margin-top:6px} .sendrow button{background:#0e7490;color:#fff;border:0;border-radius:8px;padding:8px 18px;cursor:pointer}",
       "</style></head><body>",
       "<div class='topbar'><span>Chat</span><span class='pill'>Vyntra</span><span class='spacer'></span><button id='refresh' title='Refresh'>↻</button><button id='newChatTop' title='New chat'>+</button></div>",
+      "<div style='display:flex;gap:6px;padding:6px 12px 0'><button class='small' id='toggleSessions' style='margin:0'>Past chats ▾</button><button class='small' id='toggleCtx' style='margin:0'>Context used (tokens) ▾</button></div>",
+      "<div id='topSessions' style='margin:8px 12px;padding:10px;border:1px solid var(--vscode-panel-border);border-radius:10px'><b>Past chats</b><input id='sessionSearch' placeholder='Search past chats…' style='margin-top:6px;padding:6px'><div id='sessionList' style='margin-top:6px;color:var(--vscode-descriptionForeground)'>No past chats yet.</div></div>",
+      "<div id='topCtx' style='margin:0 12px 8px'><div style='display:flex;justify-content:space-between;font-size:12px;color:var(--vscode-descriptionForeground)'><span>Context used</span><span id='ctxText'>0 tokens</span></div><div style='height:8px;border-radius:4px;background:var(--vscode-panel-border);overflow:hidden;margin-top:4px'><div id='ctxFill' style='height:100%;width:0%;background:#2dd4bf'></div></div><div id='ctxSummary' style='font-size:12px;color:var(--vscode-descriptionForeground);margin-top:4px'></div></div>",
       "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
       "<div class='autorow'><span>Auto</span><span class='local'>LOCAL</span><span>▾</span><span id='host' style='color:var(--vscode-descriptionForeground)'>checking…</span></div>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button><button id='fastBtn' title='Fast mode: smaller context, faster answers'>Fast</button></div>",
@@ -2062,9 +2254,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<button class='small' id='installOllama'>Install Ollama (if terminal says ollama is not recognized)</button>",
       "</div>",
       "<div id='chatStage' style='display:none;flex:1;flex-direction:column;min-height:0'>",
-      "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='exportChat'>Export chat</button><button class='small' id='undo'>Undo last apply</button></div>",
-      "<div style='margin:8px 12px;padding:10px;border:1px solid var(--vscode-panel-border);border-radius:10px'><b>Past chats</b><div id='sessionList' style='margin-top:6px;color:var(--vscode-descriptionForeground)'>No past chats yet.</div></div>",
-      "<div style='margin:0 12px 8px'><div style='display:flex;justify-content:space-between;font-size:12px;color:var(--vscode-descriptionForeground)'><span>Context used</span><span id='ctxText'>0 tokens</span></div><div style='height:8px;border-radius:4px;background:var(--vscode-panel-border);overflow:hidden;margin-top:4px'><div id='ctxFill' style='height:100%;width:0%;background:#2dd4bf'></div></div><div id='ctxSummary' style='font-size:12px;color:var(--vscode-descriptionForeground);margin-top:4px'></div></div>",
+      "<div style='padding:0 12px'><button class='small' id='changeModel'>← Change model</button><button class='small' id='stopBtn'>Stop generation</button><button class='small' id='newChat'>New chat</button><button class='small' id='regenerateBtn'>Regenerate</button><button class='small' id='copyLastBtn'>Copy last answer</button><button class='small' id='exportChat'>Export chat</button><button class='small' id='undo'>Undo last apply</button></div>",
       "<button class='small' id='buildPlan' style='display:none;margin:8px 12px'>Build this plan (Agent mode)</button>",
       "<div id='proposal'><b>Proposal — nothing written yet</b><div id='files'></div><div id='cmds'></div>",
       "<button class='primary' id='approveAll'>Approve all files</button>",
@@ -2083,6 +2273,9 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('stopBtn').addEventListener('click', function(){ vscode.postMessage({type:'stop'}); });",
       "document.getElementById('newChat').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
       "document.getElementById('exportChat').addEventListener('click', function(){ vscode.postMessage({type:'exportChat'}); });",
+      "document.getElementById('regenerateBtn').addEventListener('click', function(){ vscode.postMessage({type:'regenerate'}); });",
+      "document.getElementById('copyLastBtn').addEventListener('click', function(){ var msgs=document.querySelectorAll('#chat .msg.ai'); var last=null; for(var i=msgs.length-1;i>=0;i--){ var cand=msgs[i].textContent; if(cand && cand.indexOf('— ')!==0 && cand.indexOf('Context note')!==0 && cand.indexOf('Step ')!==0){ last=msgs[i]; break; } } if(!last){ return; } var txt=last.textContent; if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(txt); } else { var ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); } document.getElementById('copyLastBtn').textContent='Copied ✓'; setTimeout(function(){ document.getElementById('copyLastBtn').textContent='Copy last answer'; }, 1500); });",
+      "document.getElementById('sessionSearch').addEventListener('input', function(){ if(window._lastSessions){ renderSessions(window._lastSessions); } });",
       "document.getElementById('newChatTop').addEventListener('click', function(){ document.getElementById('chat').innerHTML=''; vscode.postMessage({type:'newChat'}); });",
       "document.getElementById('undo').addEventListener('click', function(){ vscode.postMessage({type:'undo'}); });",
       "document.getElementById('fastBtn').addEventListener('click', function(e){ var cb=document.getElementById('lowBandwidth'); cb.checked=!cb.checked; e.target.classList.toggle('on', cb.checked); });",
@@ -2098,21 +2291,26 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('input').addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });",
       "document.querySelectorAll('.modes button[data-mode]').forEach(function(b){ b.addEventListener('click', function(){ mode=b.getAttribute('data-mode'); document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x===b); }); }); });",
       "document.getElementById('refresh').addEventListener('click', function(){ vscode.postMessage({type:'refresh'}); });",
-      "document.getElementById('approveAll').addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; vscode.postMessage({type:'approveAll'}); });",
+      "document.getElementById('toggleSessions').addEventListener('click', function(){ var b=document.getElementById('topSessions'); var hidden=b.style.display==='none'; b.style.display=hidden?'block':'none'; document.getElementById('toggleSessions').textContent=hidden?'Past chats ▾':'Past chats ▸'; });",
+      "document.getElementById('toggleCtx').addEventListener('click', function(){ var b=document.getElementById('topCtx'); var hidden=b.style.display==='none'; b.style.display=hidden?'block':'none'; document.getElementById('toggleCtx').textContent=hidden?'Context used (tokens) ▾':'Context used (tokens) ▸'; });",
+      "document.getElementById('approveAll').addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; document.getElementById('approveAll').disabled=true; document.getElementById('approveAll').textContent='Approving…'; vscode.postMessage({type:'approveAll'}); });",
       "document.getElementById('reject').addEventListener('click', function(){ document.getElementById('proposal').style.display='none'; vscode.postMessage({type:'rejectProposal'}); });",
       "document.getElementById('runCmds').addEventListener('click', function(){ vscode.postMessage({type:'runCommands'}); });",
+      "function renderSessions(sessions){ var list=document.getElementById('sessionList'); var q=(document.getElementById('sessionSearch').value||'').toLowerCase(); list.innerHTML=''; var shown=sessions.filter(function(s){ return !q || s.title.toLowerCase().indexOf(q)>=0; }); if(!shown.length){ list.textContent=sessions.length?'No past chats match that search.':'No past chats yet.'; return; } shown.forEach(function(s){ var row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:4px 0'; var b=document.createElement('button'); b.className='small'; b.style.cssText='flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; b.textContent=s.title+' ('+s.count+')'; b.addEventListener('click', function(){ vscode.postMessage({type:'openSession', id:s.id}); }); row.appendChild(b); var r=document.createElement('button'); r.className='small'; r.textContent='✎'; r.title='Rename this chat'; r.addEventListener('click', function(){ vscode.postMessage({type:'renameSession', id:s.id}); }); row.appendChild(r); var d=document.createElement('button'); d.className='small'; d.textContent='✕'; d.title='Delete this chat'; d.addEventListener('click', function(){ vscode.postMessage({type:'deleteSession', id:s.id}); }); row.appendChild(d); list.appendChild(row); }); }",
       "window.addEventListener('message', function(ev){ var m=ev.data;",
       " if(m.type==='status'){ document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); document.getElementById('readyText').textContent = m.online ? 'Ready' : 'Ollama offline'; var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
       " else if(m.type==='assistant'){ if(currentBubble && (currentBubble.textContent==='Thinking…' || currentBubble.textContent==='')){ currentBubble.remove(); } currentBubble=null; addMsg(m.text,'ai'); }",
       " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",
-      " else if(m.type==='sessions'){ var list=document.getElementById('sessionList'); list.innerHTML=''; if(!m.sessions || !m.sessions.length){ list.textContent='No past chats yet.'; } else { m.sessions.forEach(function(s){ var row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:4px 0'; var b=document.createElement('button'); b.className='small'; b.style.cssText='flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; b.textContent=s.title+' ('+s.count+')'; b.addEventListener('click', function(){ vscode.postMessage({type:'openSession', id:s.id}); }); row.appendChild(b); var d=document.createElement('button'); d.className='small'; d.textContent='✕'; d.title='Delete this chat'; d.addEventListener('click', function(){ vscode.postMessage({type:'deleteSession', id:s.id}); }); row.appendChild(d); list.appendChild(row); }); } }",
+      " else if(m.type==='sessions'){ window._lastSessions=m.sessions||[]; renderSessions(window._lastSessions); }",
       " else if(m.type==='context'){ var fill=document.getElementById('ctxFill'); var txt=document.getElementById('ctxText'); var sum=document.getElementById('ctxSummary'); if(fill){ fill.style.width=m.pct+'%'; fill.style.background = m.pct>=90 ? '#ef4444' : (m.pct>=70 ? '#f59e0b' : '#2dd4bf'); } if(txt){ txt.textContent=m.tokens+' / '+m.window+' tokens ('+m.pct+'%)'; } if(sum){ sum.textContent = m.summaryCount ? m.summaryCount+' older message(s) summarised and kept in context.' : ''; } }",
-      " else if(m.type==='restoreHistory'){ document.getElementById('chat').innerHTML=''; (m.messages||[]).forEach(function(msg){ addMsg(msg.content, msg.role==='user' ? 'user' : 'ai'); }); currentBubble=null; }",
+      " else if(m.type==='restoreHistory'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; document.getElementById('chat').innerHTML=''; (m.messages||[]).forEach(function(msg){ addMsg(msg.content, msg.role==='user' ? 'user' : 'ai'); }); currentBubble=null; }",
       " else if(m.type==='setupStatus'){ document.getElementById('setupStatus').textContent=m.text; } else if(m.type==='showChat'){ document.getElementById('setup').style.display='none'; document.getElementById('chatStage').style.display='flex'; } else if(m.type==='planReady'){ lastPlan=m.text; document.getElementById('buildPlan').style.display='block'; }",
       " else if(m.type==='prefill'){ document.getElementById('input').value=m.text; mode=m.mode||'ask'; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); send(); }",
       " else if(m.type==='setMode'){ mode=m.mode; document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')===mode); }); }",
-      " else if(m.type==='proposal'){ var box=document.getElementById('proposal'); box.style.display='block'; var files=document.getElementById('files'); files.innerHTML=''; m.proposal.files.forEach(function(f){ var row=document.createElement('div'); row.textContent=(f.exists?'Update: ':'New file: ')+f.path+' '; var vb=document.createElement('button'); vb.className='small'; vb.textContent='View (review)'; vb.addEventListener('click', function(){ vscode.postMessage({type:'viewProposalFile', path:f.path}); }); row.appendChild(vb); var b=document.createElement('button'); b.className='small'; b.textContent='Approve this file'; b.addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; vscode.postMessage({type:'approveFile', path:f.path}); }); row.appendChild(b); files.appendChild(row); if(f.preview){ var pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:#ddd;padding:6px;font-size:11px'; pre.textContent=f.preview; files.appendChild(pre); } }); var cmds=document.getElementById('cmds'); cmds.textContent = m.proposal.commands.length ? 'Commands (run only on approval): '+m.proposal.commands.join('  •  ') : 'No commands proposed.'; }",
+      " else if(m.type==='fileApproved'){ var rows=document.querySelectorAll('#files button'); rows.forEach(function(btn){ if((btn.textContent==='Approve this file' || btn.textContent==='Approving…') && btn.parentNode && btn.parentNode.textContent.indexOf(m.path)>=0){ btn.disabled=true; btn.textContent='Approved ✓'; } }); }",
+      " else if(m.type==='proposalDone'){ document.getElementById('proposal').style.display='none'; }",
+      " else if(m.type==='proposal'){ var box=document.getElementById('proposal'); box.style.display='block'; var aa=document.getElementById('approveAll'); if(aa){ aa.disabled=false; aa.textContent='Approve all files'; } var files=document.getElementById('files'); files.innerHTML=''; m.proposal.files.forEach(function(f){ var row=document.createElement('div'); row.textContent=(f.exists?'Update: ':'New file: ')+f.path+' '; var vb=document.createElement('button'); vb.className='small'; vb.textContent='View (review)'; vb.addEventListener('click', function(){ vscode.postMessage({type:'viewProposalFile', path:f.path}); }); row.appendChild(vb); var b=document.createElement('button'); b.className='small'; b.textContent='Approve this file'; b.addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; b.disabled=true; b.textContent='Approving…'; vscode.postMessage({type:'approveFile', path:f.path}); }); row.appendChild(b); files.appendChild(row); if(f.preview){ var pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;max-height:200px;overflow:auto;background:#111;color:#ddd;padding:6px;font-size:11px'; pre.textContent=f.preview; files.appendChild(pre); } }); var cmds=document.getElementById('cmds'); cmds.textContent = m.proposal.commands.length ? 'Commands (run only on approval): '+m.proposal.commands.join('  •  ') : 'No commands proposed.'; }",
       "});",
       "</script></body></html>"
     ].join("");

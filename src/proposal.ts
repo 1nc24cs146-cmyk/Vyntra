@@ -11,7 +11,7 @@ export interface Proposal {
   raw: string;
 }
 
-const DANGEROUS = [/rm\s+-rf\s+\//, /\bsudo\b/, /\bmkfs\b/, /:\(\)\s*\{/, />\s*\/dev\/sd/];
+const DANGEROUS = [/rm\s+-rf\s+(\/|~|\.)/, /\bsudo\b/, /\bmkfs\b/, /:\(\)\s*\{/, />\s*\/dev\/sd/, /\brd\s+\/s\b/i, /\bdel\s+\/[a-z]*\s*\*/i, /\bformat\s+[a-z]:/i, /Remove-Item\b.*-Recurse/i];
 
 export function isDangerousCommand(command: string): boolean {
   return DANGEROUS.some((re) => re.test(command));
@@ -31,17 +31,30 @@ export function isDangerousCommand(command: string): boolean {
  * npm test
  * ```
  */
+export function isUnsafeProposalPath(path: string): boolean {
+  // A model must never be able to escape the project: no ".." segments,
+  // no empty path, no directory-only path. Absolute paths are checked
+  // again in applyFile against the actual target folder.
+  const norm = path.replace(/\\/g, "/").trim();
+  if (!norm || norm.endsWith("/")) { return true; }
+  return norm.split("/").some((seg) => seg === "..");
+}
 export function parseProposal(raw: string): Proposal {
   const files: ProposedFile[] = [];
+  const seen = new Map<string, number>();
   const fileRe = /###\s*FILE:\s*([^\n`]+)\n```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
   while ((match = fileRe.exec(raw)) !== null) {
-    files.push({
+    const path = match[1].trim().replace(/\\/g, "/").replace(/^\.\//, "");
+    if (isUnsafeProposalPath(path)) { continue; }
+    const file: ProposedFile = {
       content: match[2].replace(/\n$/, ""),
       exists: false,
       original: null,
-      path: match[1].trim()
-    });
+      path
+    };
+    // Same file proposed twice: keep the last version, do not write it twice.
+    if (seen.has(path)) { files[seen.get(path)!] = file; } else { seen.set(path, files.length); files.push(file); }
   }
   const commands: string[] = [];
   const cmdRe = /###\s*COMMANDS\s*\n```(?:sh|bash|shell)?\n([\s\S]*?)```/i;

@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.27-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.32-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.27, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.32, live on Open VSX |
 | **Editor** | Antigravity |
 | **Downloads** | 2,328 on Open VSX (4 Nov 2026), 2 reviews averaging 5.0 |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
@@ -121,6 +121,10 @@ Type `/skills` any time to see the list again. Example: `/review look at this fu
 You can also export a whole chat: press **Export chat** in the panel (or run "LocalNest: Export Chat to Markdown"). It opens as a document for you to save — nothing is written to disk automatically.
 
 ## Saved chats, context meter, your own skills and rules
+
+**Learned answers.** Teach the extension a question + answer and it remembers it for next time: `/learn <question> | <answer>`, or just type `Q: <question> A: <answer>`. Correcting a wrong answer with "No, the correct answer is …" stores it against that question too. Matching learned answers are used first, before the model guesses. See them with `/learned`, forget one with `/forget-learned <number>`.
+
+Every case has a fallback, not a silent fail: Ollama offline, no model pulled, no folder open, a model reply with broken file format, a file path escaping the project, a destructive command, and a failed stream all produce a visible message and leave nothing half-written.
 
 **Saved chats.** Every thread is saved automatically, with a title taken from your first message. The panel shows a **Past chats** list — tap any chat to reopen it in full, or ✕ to delete it. Closing the panel no longer loses a thread: when the panel reopens, your current chat is replayed back into it. You can also run "LocalNest: Reopen a Past Chat" from the Command Palette. A new chat does not delete old ones, and New Chat only clears the current thread.
 
