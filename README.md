@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.32-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.33-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.32, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.33, live on Open VSX |
 | **Editor** | Antigravity |
 | **Downloads** | 2,328 on Open VSX (4 Nov 2026), 2 reviews averaging 5.0 |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
@@ -123,6 +123,8 @@ You can also export a whole chat: press **Export chat** in the panel (or run "Lo
 ## Saved chats, context meter, your own skills and rules
 
 **Learned answers.** Teach the extension a question + answer and it remembers it for next time: `/learn <question> | <answer>`, or just type `Q: <question> A: <answer>`. Correcting a wrong answer with "No, the correct answer is …" stores it against that question too. Matching learned answers are used first, before the model guesses. See them with `/learned`, forget one with `/forget-learned <number>`.
+
+**Trained for all 15 languages (v0.9.33).** Python, Java, Go, Rust, C, C++, Kotlin, Swift, TypeScript, JavaScript, PHP, Ruby, C#, SQL and HTML/CSS/JS — each with its own rules for the model (idioms, project files, run and test commands, and the libraries to prefer, e.g. Flask/Django/FastAPI for Python, Spring Boot/JUnit for Java, React/Express/Jest for JavaScript, Laravel for PHP, Rails for Ruby). A request like "react javascript app" is now detected as JavaScript, not Java.
 
 Every case has a fallback, not a silent fail: Ollama offline, no model pulled, no folder open, a model reply with broken file format, a file path escaping the project, a destructive command, and a failed stream all produce a visible message and leave nothing half-written.
 

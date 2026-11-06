@@ -9,7 +9,7 @@ import { buildTemplateApp } from "./templates";
 import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
 import { buildRootForPrompt, desktopDir, resolveTargetRoot, sanitizeProjectName, TargetKind } from "./desktop";
 import { checkGemini, geminiChatStream } from "./gemini";
-import { buildLanguageProject, detectLanguage, platformInfo } from "./languages";
+import { buildLanguageProject, detectLanguage, languageGuidance, platformInfo } from "./languages";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -1363,7 +1363,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     : { files: [] as any[], summary: "No workspace inspection requested — answering the task directly, without scanning project files." };
   const contextPrompt = inspectWorkspace ? contextToPrompt(ctx.files) : "No workspace files inspected. Answer from the question/task alone.";
   const lang = detectLanguage(text);
-  const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." : "";
+  const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." + languageGuidance(lang) : "";
   if (inspectWorkspace) {
     // Step 1, made visible, only when the user asked for a project/file look:
     view?.webview.postMessage({

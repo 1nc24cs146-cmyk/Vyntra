@@ -11,21 +11,24 @@ export interface LanguageInfo {
   runCommand: string;
 }
 
+// Order matters: JavaScript/TypeScript come before Java, because
+// "javascript" contains "java" as a substring — otherwise every
+// JavaScript request was mis-detected as Java.
 const LANGUAGES: { id: string; keywords: string[]; name: string }[] = [
-  { id: "python", keywords: ["python", "py ", ".py"], name: "Python" },
-  { id: "java", keywords: ["java", "spring", "maven", "gradle"], name: "Java" },
-  { id: "go", keywords: ["golang", " go ", "go program"], name: "Go" },
-  { id: "rust", keywords: ["rust", "cargo"], name: "Rust" },
-  { id: "cpp", keywords: ["c++", "cpp"], name: "C++" },
-  { id: "c", keywords: ["c program", "c language", " in c"], name: "C" },
-  { id: "kotlin", keywords: ["kotlin"], name: "Kotlin" },
-  { id: "swift", keywords: ["swift", "ios"], name: "Swift" },
-  { id: "typescript", keywords: ["typescript", " ts "], name: "TypeScript" },
-  { id: "javascript", keywords: ["javascript", "node", "nodejs"], name: "JavaScript" },
-  { id: "php", keywords: ["php"], name: "PHP" },
-  { id: "ruby", keywords: ["ruby"], name: "Ruby" },
-  { id: "csharp", keywords: ["c#", "csharp", ".net", "dotnet"], name: "C#" },
-  { id: "sql", keywords: ["sql", "database query"], name: "SQL" },
+  { id: "python", keywords: ["python", "py ", " py", ".py", "django", "flask", "fastapi", "pandas", "numpy", "pytest"], name: "Python" },
+  { id: "typescript", keywords: ["typescript", " ts ", ".ts", ".tsx", "angular", "nestjs"], name: "TypeScript" },
+  { id: "javascript", keywords: ["javascript", "node", "nodejs", ".js", ".jsx", "react", "express", "vue", "jest", "npm"], name: "JavaScript" },
+  { id: "java", keywords: ["java", "spring", "maven", "gradle", "junit", ".java", "spring boot"], name: "Java" },
+  { id: "go", keywords: ["golang", " go ", "go program", ".go", "gin", "fiber"], name: "Go" },
+  { id: "rust", keywords: ["rust", "cargo", ".rs", "tokio", "serde"], name: "Rust" },
+  { id: "cpp", keywords: ["c++", "cpp", ".cpp", ".hpp", "cmake"], name: "C++" },
+  { id: "c", keywords: ["c program", "c language", " in c", ".c", "gcc"], name: "C" },
+  { id: "kotlin", keywords: ["kotlin", ".kt", "android", "jetpack"], name: "Kotlin" },
+  { id: "swift", keywords: ["swift", "ios", ".swift", "swiftui", "xcode"], name: "Swift" },
+  { id: "php", keywords: ["php", ".php", "laravel", "composer", "wordpress"], name: "PHP" },
+  { id: "ruby", keywords: ["ruby", ".rb", "rails", "sinatra", "rspec"], name: "Ruby" },
+  { id: "csharp", keywords: ["c#", "csharp", ".net", "dotnet", ".cs", "asp.net", "blazor"], name: "C#" },
+  { id: "sql", keywords: ["sql", "database query", "postgres", "mysql", "sqlite", "select "], name: "SQL" },
   { id: "html", keywords: ["html", "website", "web page", "web app", "webapp"], name: "HTML/CSS/JS" }
 ];
 
@@ -42,7 +45,7 @@ export function detectLanguage(prompt: string): LanguageInfo | null {
 export function languageInfo(id: string): LanguageInfo {
   switch (id) {
     case "python":
-      return { extension: "py", id, mainFile: "main.py", name: "Python", runCommand: "python3 main.py" };
+      return { extension: "py", id, mainFile: "main.py", name: "Python", runCommand: os.platform() === "win32" ? "python main.py" : "python3 main.py" };
     case "java":
       return { extension: "java", id, mainFile: "Main.java", name: "Java", runCommand: "javac Main.java && java Main" };
     case "go":
@@ -117,6 +120,48 @@ function codeFor(lang: LanguageInfo, title: string): string {
   }
 }
 
+
+/** Per-language rules the model must follow for the detected language.
+ * This is the "training" for one language at a time: idioms, project
+ * files, run/test commands, and the libraries to prefer — so the model
+ * does not fall back to generic JavaScript/web habits. */
+export function languageGuidance(lang: LanguageInfo): string {
+  switch (lang.id) {
+    case "python":
+      return " Python rules: use Python 3 only (never Python 2), type hints on public functions, f-strings, pathlib over os.path, and the standard library first. Use " + (os.platform() === "win32" ? "`python` (not `python3`) and `py -m pip`" : "`python3` and `pip3`") + " on this machine. Put any third-party package in requirements.txt and name it in the README. Prefer Flask for a small web app, FastAPI for an API, Django only if the user asked for it, requests for HTTP, pandas/numpy only for data work, and pytest/unittest for tests — include a runnable test file when you add logic. Never use `pip install` inside code; list it as a command instead.";
+    case "javascript":
+      return " JavaScript rules: use modern ES2022+, node for scripts, npm for packages, and package.json with start/test scripts. Prefer the standard library and fetch over new dependencies. React: functional components + hooks, no class components unless asked. Express: express.Router, JSON middleware, proper status codes, supertest for tests. Test with Jest or Vitest — include a runnable test file when you add logic.";
+    case "typescript":
+      return " TypeScript rules: strict types, no `any` unless unavoidable, tsconfig with strict mode, and `npx tsc` to check before running. Angular: standalone components, signals, HttpClient. NestJS: controllers + services + modules, no logic in controllers.";
+    case "java":
+      return " Java rules: Java 17+, no raw types, records for plain data, try-with-resources, and Maven (pom.xml) or Gradle for dependencies — never a bare .jar in the repo. Spring Boot for a web app or API, JUnit 5 for tests (include a runnable test), and `javac`/`java` or `mvn test` to check before running.";
+    case "go":
+      return " Go rules: gofmt-formatted code, `go mod` for dependencies, error return values checked (never ignored), and `go test ./...` to check. Gin or the standard net/http for a web app, never a framework the user did not ask for.";
+    case "rust":
+      return " Rust rules: ownership-safe code, no `unwrap()` in library code (return Result), Cargo.toml for dependencies, and `cargo test` to check. tokio only for async work the user asked for, serde for JSON.";
+    case "c":
+      return " C rules: C17, no gets(), check malloc/free pairs, -Wall -Wextra clean, and `gcc -Wall -Wextra` to check before running.";
+    case "cpp":
+      return " C++ rules: C++17+, RAII and smart pointers (no raw new/delete in new code), std::vector over raw arrays, CMake for multi-file projects, and `g++ -std=c++17 -Wall -Wextra` to check.";
+    case "kotlin":
+      return " Kotlin rules: null-safety (no !! unless justified), data classes for plain data, coroutines only for async work, and `kotlinc` + JUnit for tests. Android: Jetpack Compose, ViewModel, no logic in the UI layer.";
+    case "swift":
+      return " Swift rules: Swift 5+, optionals handled safely (no force-unwrap in new code), SwiftUI for iOS UI, and `swift test` / `swift build` to check.";
+    case "php":
+      return " PHP rules: PHP 8+, strict types (`declare(strict_types=1)`), prepared statements for every database query (never string-concatenated SQL), Composer for dependencies, Laravel only if the user asked for it, and PHPUnit for tests.";
+    case "ruby":
+      return " Ruby rules: Ruby 3+, Bundler/Gemfile for dependencies, Rails only if the user asked for it, RSpec/Minitest for tests, and `ruby` / `bundle exec rspec` to check.";
+    case "csharp":
+      return " C# rules: C# 12+, nullable reference types on, LINQ over manual loops, async/await for I/O, ASP.NET Core for a web app/API, and `dotnet test` to check.";
+    case "sql":
+      return " SQL rules: parameterised queries only (never string-concatenated values), explicit column lists (no SELECT * in app code), and a CREATE TABLE + INSERT + SELECT that actually runs in the target database (PostgreSQL/MySQL/SQLite — say which).";
+    case "html":
+      return " HTML/CSS/JS rules: semantic HTML, one self-contained index.html unless the user asked for separate files, CSS in <style> or style.css, JS in <script> or app.js, CSP meta tag, textContent not innerHTML for user data, and localStorage for persistence.";
+    default:
+      return "";
+  }
+}
+
 export function buildLanguageProject(prompt: string): { files: { content: string; path: string }[]; language: LanguageInfo; title: string } | null {
   const lang = detectLanguage(prompt);
   if (!lang || lang.id === "html") {
@@ -124,6 +169,10 @@ export function buildLanguageProject(prompt: string): { files: { content: string
   }
   const title = titleFromPrompt(prompt);
   const files: { content: string; path: string }[] = [{ content: codeFor(lang, title), path: lang.mainFile }];
+  if (lang.id === "python") {
+    files.push({ content: "import unittest\n\n\nclass TestStarter(unittest.TestCase):\n    def test_main_runs(self):\n        # The starter's main() is interactive, so test the import only:\n        # if main.py imports cleanly, the project is wired correctly.\n        import main\n        self.assertTrue(hasattr(main, 'main'))\n\n\nif __name__ == '__main__':\n    unittest.main()\n", path: "test_main.py" });
+    files.push({ content: "# Add one package per line, e.g. requests, flask, fastapi\n# Install with: pip install -r requirements.txt\n", path: "requirements.txt" });
+  }
   if (lang.buildFile && lang.buildFileContent) {
     files.push({ content: lang.buildFileContent, path: lang.buildFile });
   }
