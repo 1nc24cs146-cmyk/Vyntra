@@ -29,7 +29,6 @@
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
 | **Review rule** | Nothing is written until you approve it — Ask and Plan never write at all |
-| **Also built as** | Vyntra (`nitinkumarhiremath.vyntra`) — the same code with Vyntra branding; that listing is currently down |
 | **License** | MIT |
 
 You ask it a question, plan a change, or build a whole app — and it never writes a file until you have reviewed and approved it.
