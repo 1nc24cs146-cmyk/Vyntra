@@ -162,6 +162,51 @@ export function languageGuidance(lang: LanguageInfo): string {
   }
 }
 
+export function fullLanguageGuidance(lang: LanguageInfo): string {
+  return languageGuidance(lang) + realWorldTasks(lang);
+}
+
+
+/** Real-world problems each language is actually used for, and the stack
+ * to reach for. This is the "train for real-world problems" pass: when the
+ * user describes a real problem (an API, a login system, a report, a
+ * migration), the model should build that, with validation, errors,
+ * persistence and tests — not a hello-world starter. */
+export function realWorldTasks(lang: LanguageInfo): string {
+  switch (lang.id) {
+    case "python":
+      return " Real-world work in Python: REST API (FastAPI with Pydantic validation, or Flask), login/auth (JWT, hashed passwords, never plain text), database CRUD (SQLAlchemy + migrations, parameterised queries), data pipeline/report (pandas, CSV/Excel in and out), automation script, web scraping (requests + BeautifulSoup, respect robots.txt). Always: env vars for secrets, pagination on list endpoints, proper error responses, logging, and a test for each route.";
+    case "javascript":
+      return " Real-world work in JavaScript: REST API (Express — validation, auth middleware, rate limiting, pagination), React app (forms with validation, API error states, loading states), CLI tool, file upload/download, real-time chat (WebSocket), cron/scheduled job. Always: validate every input, never trust the client, handle network failures, and include a test for each route/component.";
+    case "typescript":
+      return " Real-world work in TypeScript: REST API (NestJS — controllers, services, DTO validation, guards for auth), Angular app (forms, guards, interceptors for tokens), typed API client, background job. Always: strict types end to end, DTO validation on every endpoint, auth guards, and tests for controllers and services.";
+    case "java":
+      return " Real-world work in Java: Spring Boot REST API (validation, JWT security, pagination, exception handlers), microservice, batch job, database CRUD (Spring Data JPA, migrations with Flyway/Liquibase). Always: validate DTOs, return proper HTTP statuses, handle exceptions centrally, and test controllers with MockMvc.";
+    case "go":
+      return " Real-world work in Go: REST API (Gin or net/http — middleware for auth/logging, pagination), CLI tool, background worker, microservice. Always: context with timeouts, structured errors, graceful shutdown, and httptest suites for handlers.";
+    case "rust":
+      return " Real-world work in Rust: REST API (axum/actix — typed handlers, error types), CLI tool, background worker, systems tool. Always: Result-based errors (no unwrap in production paths), config from env, and tests for every public function.";
+    case "c":
+      return " Real-world work in C: embedded/firmware code, system tool, file parser, network client. Always: check every malloc/fopen return, bound-check buffers, no gets(), and a test harness for the core logic.";
+    case "cpp":
+      return " Real-world work in C++: desktop app, game engine code, high-performance service, file/network tool. Always: RAII, no raw new/delete, bounds-checked containers, and unit tests for the core logic.";
+    case "kotlin":
+      return " Real-world work in Kotlin: Android app (Compose + ViewModel + Room database, offline-first), Spring Boot API. Always: handle offline/no-network states, loading and error UI states, and tests for ViewModels and repositories.";
+    case "swift":
+      return " Real-world work in Swift: iOS app (SwiftUI + MVVM, Core Data/URLSession, offline handling), macOS tool. Always: handle offline states, loading/error UI, and tests for view models and network code.";
+    case "php":
+      return " Real-world work in PHP: Laravel web app/API (validation, auth, Eloquent + migrations), WordPress plugin/theme, form + payment flow. Always: prepared statements, CSRF protection, validate and sanitise every input, and feature tests for routes.";
+    case "ruby":
+      return " Real-world work in Ruby: Rails app/API (validations, auth with Devise or JWT, ActiveRecord + migrations), background job (Sidekiq). Always: strong parameters, validate models, and request specs for controllers.";
+    case "csharp":
+      return " Real-world work in C#: ASP.NET Core API (validation, JWT auth, Entity Framework + migrations), desktop app (WPF/MAUI), background service. Always: validate DTOs, return proper statuses, handle exceptions centrally, and tests for controllers and services.";
+    case "sql":
+      return " Real-world work in SQL: reporting query (joins, window functions, aggregates), migration script (up/down, idempotent), data cleanup, dashboard query. Always: parameterised values, indexes on filter/join columns, and a sample result in the README.";
+    default:
+      return " Real-world work on the web: login + signup flow, product/shop with cart and checkout, dashboard with real data, form with validation and error states, search + filters + pagination. Always: validate inputs, show loading and error states, persist data (localStorage or a backend), and make it work without a network where possible.";
+  }
+}
+
 export function buildLanguageProject(prompt: string): { files: { content: string; path: string }[]; language: LanguageInfo; title: string } | null {
   const lang = detectLanguage(prompt);
   if (!lang || lang.id === "html") {

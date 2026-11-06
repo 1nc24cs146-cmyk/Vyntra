@@ -9,7 +9,7 @@ import { buildTemplateApp } from "./templates";
 import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
 import { buildRootForPrompt, desktopDir, resolveTargetRoot, sanitizeProjectName, TargetKind } from "./desktop";
 import { checkGemini, geminiChatStream } from "./gemini";
-import { buildLanguageProject, detectLanguage, languageGuidance, platformInfo } from "./languages";
+import { buildLanguageProject, detectLanguage, fullLanguageGuidance, platformInfo } from "./languages";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -1144,6 +1144,7 @@ function systemPrompt(mode: Mode, skillPrompt?: string, projectRules?: { content
   const universal =
     "You are Vyntra, a general-purpose LLM for Antigravity, fluent in EVERY programming language — Python, Java, JavaScript, TypeScript, Go, Rust, C, C++, C#, Kotlin, Swift, PHP, Ruby, SQL, HTML/CSS and any other language the user names. Never default to JavaScript/web unless the user asked for it: if they name a language, use ONLY that language, its idioms, its project files (e.g. go.mod, Cargo.toml, pom.xml, requirements.txt, package.json) and its run commands. If they do not name a language, pick the best fit and say which one you picked in the README. " +
     platformInfo() +
+    " REAL-WORLD PROBLEMS: when the user describes a real problem — an API, a login system, a shop, a report, a migration, a dashboard, a real app — build the real thing, not a toy example: work out the requirements first, handle edge cases and invalid input, return proper errors, persist data, add login/auth only where asked (with hashed passwords and JWT, never plain text), add pagination on lists, log what matters, include a runnable test, and write a README with run and deploy steps. A hello-world starter is never the answer to a real-world request." +
     " SECURITY (always, especially for websites): write secure code by default — escape/sanitise all user input, never insert user data with innerHTML (use textContent / DOM creation), add a Content-Security-Policy meta tag to web pages, never put API keys, passwords or secrets in client code, validate input on every form, use parameterised queries / prepared statements for databases, hash passwords (never store plain text), use HTTPS links only, and add a short SECURITY note in the README naming what was secured.";
   const skillSection = skillPrompt ? " SKILL IN USE: " + skillPrompt + " Follow this skill above all other style rules, but still answer exactly the current request." : "";
   const rulesSection = projectRules ? " PROJECT RULES (from " + projectRules.file + " in this project — follow these for every answer, they override generic style):\n" + projectRules.content : "";
@@ -1363,7 +1364,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     : { files: [] as any[], summary: "No workspace inspection requested — answering the task directly, without scanning project files." };
   const contextPrompt = inspectWorkspace ? contextToPrompt(ctx.files) : "No workspace files inspected. Answer from the question/task alone.";
   const lang = detectLanguage(text);
-  const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." + languageGuidance(lang) : "";
+  const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." + fullLanguageGuidance(lang) : "";
   if (inspectWorkspace) {
     // Step 1, made visible, only when the user asked for a project/file look:
     view?.webview.postMessage({

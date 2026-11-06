@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.33-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.35-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,9 +23,8 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.33, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.35, live on Open VSX |
 | **Editor** | Antigravity |
-| **Downloads** | 2,328 on Open VSX (4 Nov 2026), 2 reviews averaging 5.0 |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
 | **Review rule** | Nothing is written until you approve it — Ask and Plan never write at all |
