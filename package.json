@@ -23,6 +23,8 @@
     "onCommand:localNest.searchWorkspace",
     "onCommand:localNest.editSelection",
     "onCommand:localNest.fixSelection",
+    "onCommand:localNest.fixDiagnostics",
+    "onCommand:localNest.askCodebase",
     "onCommand:localNest.connectRemote",
     "onCommand:localNest.disconnectRemote",
     "onCommand:localNest.remoteStatus",
@@ -122,6 +124,14 @@
       {
         "command": "localNest.fixSelection",
         "title": "Vyntra: Fix Selected Code or Diagnostics"
+      },
+      {
+        "command": "localNest.fixDiagnostics",
+        "title": "Vyntra: Fix Diagnostics (Auto-Fix)"
+      },
+      {
+        "command": "localNest.askCodebase",
+        "title": "Vyntra: Ask About Your Codebase"
       },
       {
         "command": "localNest.connectRemote",
@@ -414,7 +424,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.35",
+  "version": "0.9.36",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

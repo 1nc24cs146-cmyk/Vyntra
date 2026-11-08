@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.35-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.36-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.35, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.36, live on Open VSX |
 | **Editor** | Antigravity |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
@@ -113,6 +113,13 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 | `/commit` | Writes a conventional-commit message for a change you describe |
 | `/security` | Security audit: SQLi, XSS, secrets, weak crypto, SSRF, missing auth, and more, each with a risk level and a secure fix |
 | `/summarize` | Summarises a file, project or workspace |
+| `/autofix` | Auto-fix diagnostics: reads the errors/warnings in the current file (`/autofix all` for the whole workspace) and proposes fixes as reviewable FILE blocks — never applied without your approval. Also in the Command Palette: "Vyntra: Fix Diagnostics (Auto-Fix)". Works offline too: it lists the diagnostics with a hint for each known kind, and the full fix proposal needs Ollama running |
+| `/qa` | Codebase Q&A: ask about this workspace — "where is X defined", "how does Y work" — answered only from the actual workspace files, with file:line citations. Plain questions like "where is parseProposal defined?" are detected automatically, no slash needed. Also in the Command Palette: "Vyntra: Ask About Your Codebase" |
+
+## 🆕 What's new in 0.9.36
+
+- **Auto-fix diagnostics (`/autofix`).** Reads VS Code diagnostics for the current file (`/autofix all` for the whole workspace) and proposes fixes through the existing review-and-approve flow — FILE blocks you approve file by file, never auto-applied. Errors first, then warnings. Offline it still lists every diagnostic with a hint for known kinds (missing name/import, unused variable, type mismatch, possible null, syntax error). Command Palette: "Vyntra: Fix Diagnostics (Auto-Fix)".
+- **Codebase Q&A (`/qa`).** Ask about your workspace — "where is X defined", "how does Y work", "what calls Z" — and the answer is grounded in the actual files, with file:line citations. The extension scans the workspace files first and shows what it found (definitions + usages) before the model answers; if nothing matches, it says so plainly instead of inventing a file. Plain codebase questions are detected automatically, without the slash. Command Palette: "Vyntra: Ask About Your Codebase".
 
 Type `/skills` any time to see the list again. Example: `/review look at this function and tell me what is wrong`
 

@@ -10,6 +10,8 @@ import { buildMajorTemplateApp, isMajorRequest } from "./majorTemplates";
 import { buildRootForPrompt, desktopDir, resolveTargetRoot, sanitizeProjectName, TargetKind } from "./desktop";
 import { checkGemini, geminiChatStream } from "./gemini";
 import { buildLanguageProject, detectLanguage, fullLanguageGuidance, platformInfo } from "./languages";
+import { buildAutoFixPrompt, countBySeverity, DiagnosticItem, fixHintFor, formatDiagnostics } from "./diagnostics";
+import { buildCodebaseAnswer, buildCodebaseQAPrompt, extractQuestionTerms, findDefinitions, isCodebaseQuestion } from "./codebaseQA";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -619,6 +621,24 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand("localNest.chat.focus");
       setTimeout(() => { view?.webview.postMessage({ mode: "agent", text: "Fix this code from " + file + (diags ? " (diagnostics: " + diags + ")" : "") + ":\n\n```\n" + code + "\n```", type: "prefill" }); }, 400);
     }),
+    vscode.commands.registerCommand("localNest.fixDiagnostics", async () => {
+      // Auto-fix diagnostics (0.9.36): prefill /autofix in Agent mode, so
+      // fixes come back as FILE blocks for review — never applied directly.
+      const editor = vscode.window.activeTextEditor;
+      const scope = editor ? "current file" : "workspace";
+      const items = collectEditorDiagnostics(editor ? "file" : "workspace");
+      if (!items.length) { vscode.window.showInformationMessage("Vyntra: no diagnostics reported for the " + scope + " — nothing to fix."); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "agent", text: "/autofix", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.askCodebase", async () => {
+      // Codebase Q&A (0.9.36): ask about the workspace, grounded in its files.
+      const q = await vscode.window.showInputBox({ placeHolder: "e.g. where is parseProposal defined", prompt: "Ask about your codebase — answered only from the actual workspace files, with file:line citations" });
+      if (!q || !q.trim()) { return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      const question = q.trim();
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/qa " + question, type: "prefill" }); }, 400);
+    }),
     vscode.commands.registerCommand("localNest.connectRemote", async () => {
       const url = await vscode.window.showInputBox({ placeHolder: "http://192.168.1.10:11434", prompt: "Remote Ollama host URL (your own host; code is sent only there)" });
       if (!url || !/^https?:\/\//.test(url.trim())) { vscode.window.showWarningMessage("Vyntra: that is not an http(s) URL."); return; }
@@ -754,6 +774,21 @@ function selfTestText(): string {
   checks.push("parseProposal traversal blocked + duplicate deduped -> " + trav.files.length + " file(s)" + (trav.files.length === 1 && trav.files[0].content.includes("last") ? " PASS" : " FAIL"));
   checks.push("isDangerousCommand rm -rf ~ / format C: -> " + (isDangerousCommand("rm -rf ~/") && isDangerousCommand("format C:") ? "PASS" : "FAIL"));
   checks.push("displayContent strips internal prompt -> " + (displayContent({ content: "MODE: build\n\nCURRENT USER REQUEST — answer exactly this:\nbuild a site\n\nWorkspace context (background only):\nnone", role: "user" }) === "build a site" ? "PASS" : "FAIL"));
+  // Auto-fix diagnostics (0.9.36)
+  const diagItems: DiagnosticItem[] = [{ column: 5, file: "src/a.ts", line: 3, message: "Cannot find name 'foo'.", severity: "error" }];
+  checks.push("formatDiagnostics lists file:line + hint -> " + (formatDiagnostics(diagItems).includes("src/a.ts:3:5") && formatDiagnostics(diagItems).includes("imported") ? "PASS" : "FAIL"));
+  checks.push("fixHintFor TS2304 / unused / null -> " + (fixHintFor("Cannot find name 'x'.", 2304).length > 0 && fixHintFor(" 'y' is declared but its value is never read.", 6133).length > 0 && fixHintFor("Object is possibly 'null'.", 18047).length > 0 ? "PASS" : "FAIL"));
+  checks.push("countBySeverity 2 errors + 1 warning -> " + (() => { const c = countBySeverity([...diagItems, { column: 1, file: "src/a.ts", line: 1, message: "e2", severity: "error" as const }, { column: 1, file: "src/b.ts", line: 1, message: "w", severity: "warning" as const }]); return c.errors === 2 && c.warnings === 1 && c.total === 3 ? "PASS" : "FAIL"; })());
+  // Codebase Q&A (0.9.36)
+  checks.push("isCodebaseQuestion 'where is X defined' -> " + (isCodebaseQuestion("where is parseProposal defined") && isCodebaseQuestion("how does the approval flow work") && !isCodebaseQuestion("write a poem about cats") ? "PASS" : "FAIL"));
+  const qaFiles = [{ content: "export function parseProposal(raw: string): Proposal {\n  return { commands: [], files: [], raw };\n}", path: "src/proposal.ts" }];
+  const qaDefs = findDefinitions(qaFiles, extractQuestionTerms("where is parseProposal defined"));
+  checks.push("findDefinitions parseProposal -> " + (qaDefs.length >= 1 && qaDefs[0].file === "src/proposal.ts" && qaDefs[0].line === 1 ? "PASS" : "FAIL"));
+  const qaAns = buildCodebaseAnswer("where is parseProposal defined", qaFiles);
+  checks.push("buildCodebaseAnswer cites file:line -> " + (qaAns.answerText.includes("src/proposal.ts:1") ? "PASS" : "FAIL"));
+  const qaMiss = buildCodebaseAnswer("where is nosuchthing defined", qaFiles);
+  checks.push("buildCodebaseAnswer not-found says so plainly -> " + (/could not find/i.test(qaMiss.answerText) ? "PASS" : "FAIL"));
+  checks.push("buildCodebaseQAPrompt forbids inventing -> " + (buildCodebaseQAPrompt("where is x defined", []).includes("do not guess") ? "PASS" : "FAIL"));
   return checks.join("\n");
 }
 async function tryAutoStartOllama(host: string): Promise<void> {
@@ -1135,6 +1170,8 @@ const SKILLS: Record<string, Skill> = {
   commit: { description: "Write a commit message for a described change", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. If no change is described, say what information is missing instead of inventing one." },
   security: { description: "Security audit: SQLi, XSS, secrets, auth, crypto, SSRF, etc.", prompt: "Do a SECURITY AUDIT of the code given. Check SQL injection, command injection, XSS, hardcoded secrets, weak crypto, insecure random, unsafe deserialisation, path traversal, SSRF, debug mode and missing auth. Give each finding a risk level (Critical/High/Medium/Low), the risky code, and a secure fix. If nothing is risky, say so plainly." },
   summarize: { description: "Summarise a file, project or workspace", prompt: "SUMMARISE what was given: purpose, main parts, how they fit together, and anything important or risky. Keep it short and structured. Do not invent files or features that are not in the context." },
+  autofix: { description: "Auto-fix diagnostics: fix the errors/warnings in the current file (or workspace with 'all') as reviewable FILE blocks — never applied without your approval", prompt: "AUTO-FIX DIAGNOSTICS. Fix EVERY diagnostic listed in the request, errors first, then warnings. For each one, explain the cause in one line, then give the corrected code. In Agent/Build mode output the corrected files ONLY as ### FILE: blocks, so each fix goes through the normal review-and-approve flow — NEVER claim a fix has been applied, and NEVER write a file yourself. Change only the lines needed to fix the diagnostics; do not change unrelated behaviour. If a diagnostic cannot be fixed from the context given, say which one and what file you would need, instead of guessing." },
+  qa: { description: "Codebase Q&A: ask about this workspace — where X is defined, how Y works — answered only from the actual files, with file:line citations", prompt: "CODEBASE QUESTION. Answer ONLY from the workspace files given as context, and cite every claim as file:line (e.g. src/extension.ts:123). Do NOT invent functions, files or APIs that are not in the context. If the answer is not in the context, say plainly that it was not found in the searched files and name what file you would need. Keep the answer short and structured: the definition first, then how it is used, then anything risky or worth knowing." },
 };
 function skillsHelpText(): string {
   return "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
@@ -1263,6 +1300,35 @@ function needsWorkspaceContext(text: string): boolean {
   } catch { /* no editor */ }
   return false;
 }
+// --- Auto-fix diagnostics (0.9.36) ---
+// Read VS Code diagnostics into plain DiagnosticItem[] for diagnostics.ts.
+// Nothing here applies a fix — the model proposes FILE blocks and the user
+// approves them through the normal proposal flow, exactly like Agent mode.
+function collectEditorDiagnostics(scope: "file" | "workspace"): DiagnosticItem[] {
+  const toItem = (uri: vscode.Uri, d: vscode.Diagnostic): DiagnosticItem => ({
+    code: typeof d.code === "object" && d.code !== null ? String((d.code as { value?: string | number }).value ?? "") : (d.code as string | number | undefined),
+    column: d.range.start.character + 1,
+    file: vscode.workspace.asRelativePath(uri),
+    line: d.range.start.line + 1,
+    message: d.message,
+    severity: d.severity === vscode.DiagnosticSeverity.Error ? "error" : d.severity === vscode.DiagnosticSeverity.Warning ? "warning" : d.severity === vscode.DiagnosticSeverity.Information ? "info" : "hint",
+    source: d.source
+  });
+  const items: DiagnosticItem[] = [];
+  if (scope === "workspace") {
+    for (const [uri, diags] of vscode.languages.getDiagnostics()) {
+      for (const d of diags) { items.push(toItem(uri, d)); }
+    }
+  } else {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) { return items; }
+    for (const d of vscode.languages.getDiagnostics(editor.document.uri)) {
+      items.push(toItem(editor.document.uri, d));
+    }
+  }
+  items.sort((a, b) => (a.severity === "error" ? 0 : a.severity === "warning" ? 1 : 2) - (b.severity === "error" ? 0 : b.severity === "warning" ? 1 : 2) || a.file.localeCompare(b.file) || a.line - b.line);
+  return items.slice(0, 50);
+}
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
   lastChatRequest = { autoApply, majorFlag, mode, text };
   // Taught Q&A: "Q: ... A: ..." / "Question: ... Answer: ..." — store it
@@ -1288,6 +1354,12 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   // skill never gets mistaken for a normal question, and /skills lists them.
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
   let skillPrompt: string | undefined;
+  // Auto-fix diagnostics (0.9.36) and codebase Q&A (0.9.36) state, carried
+  // from the slash handling below into the model call further down.
+  let diagnosticItems: DiagnosticItem[] = [];
+  let diagnosticScope = "";
+  let isQaRequest = false;
+  let slashHandled = false;
   const customSkills = await loadCustomSkills();
   const allSkills: Record<string, Skill> = { ...SKILLS, ...customSkills };
   const projectRules = await loadProjectRules();
@@ -1315,6 +1387,39 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       else { view?.webview.postMessage({ text: "Usage: /forget-learned <number> — see /learned for the numbers.", type: "assistant" }); }
       return;
     }
+    // Auto-fix diagnostics (0.9.36): "/autofix" with no argument fixes the
+    // current file; "/autofix all" fixes the whole workspace. Unlike other
+    // skills an empty argument is valid — the diagnostics ARE the input.
+    // Fixes are proposed as FILE blocks and approved like any Agent proposal;
+    // nothing is ever applied here.
+    if (name === "autofix" || name === "fixdiagnostics" || name === "fix-diagnostics") {
+      const arg = slash[2].trim();
+      const scope = /\ball\b/i.test(arg) ? "workspace" as const : "file" as const;
+      diagnosticItems = collectEditorDiagnostics(scope);
+      diagnosticScope = scope === "workspace" ? "whole workspace" : ("current file" + (vscode.window.activeTextEditor ? " (" + vscode.workspace.asRelativePath(vscode.window.activeTextEditor.document.uri) + ")" : ""));
+      if (!diagnosticItems.length) {
+        view?.webview.postMessage({ text: "Auto-fix: no diagnostics reported for the " + diagnosticScope + " — nothing to fix. If you expected errors, make sure the file is saved and its language extension has finished checking it.", type: "assistant" });
+        return;
+      }
+      const counts = countBySeverity(diagnosticItems);
+      view?.webview.postMessage({ text: "Auto-fix: found " + diagnosticItems.length + " diagnostic(s) in the " + diagnosticScope + " (" + counts.errors + " error(s), " + counts.warnings + " warning(s)). I will propose fixes as FILE blocks for your review — nothing is applied without your approval.", type: "assistant" });
+      skillPrompt = SKILLS.autofix.prompt;
+      text = arg && !/^\s*all\s*$/i.test(arg) ? arg : "Fix all diagnostics in the " + diagnosticScope;
+      slashHandled = true;
+    }
+    // Codebase Q&A (0.9.36): "/qa where is X defined" — answered only from
+    // the actual workspace files, with file:line citations.
+    if (name === "qa") {
+      if (!slash[2].trim()) {
+        view?.webview.postMessage({ text: "Usage: /qa <your question about this codebase>\nExamples:\n/qa where is collectContext defined\n/qa how does the proposal approval flow work\n/qa what calls parseProposal", type: "assistant" });
+        return;
+      }
+      isQaRequest = true;
+      skillPrompt = SKILLS.qa.prompt;
+      text = slash[2].trim();
+      slashHandled = true;
+    }
+    if (!slashHandled) {
     const skill = allSkills[name];
     if (!skill) {
       view?.webview.postMessage({ text: "Unknown skill '/" + name + "'.\n\n" + await skillsHelpTextFull(), type: "assistant" });
@@ -1326,6 +1431,12 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     }
     skillPrompt = skill.prompt;
     text = slash[2].trim();
+    }
+  }
+  // Plain (non-slash) codebase questions are detected too, so "where is X
+  // defined?" works without remembering the /qa skill.
+  if (!slash && isCodebaseQuestion(text)) {
+    isQaRequest = true;
   }
   const cfg = getConfig();
   if (!cfg.chatMemoryEnabled) { conversationHistory = []; }
@@ -1354,7 +1465,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     view?.webview.postMessage({ text: "Building from scratch in a new folder: " + currentRequestRoot.fsPath + " — files will go there, not loose in your workspace.", type: "assistant" });
   }
   const autoNote = autoDecisionNote(text);
-  const inspectWorkspace = needsWorkspaceContext(text);
+  // Auto-fix and codebase Q&A always inspect the workspace: the diagnostics
+  // live in the editor and the Q&A answer must come from real files.
+  const inspectWorkspace = needsWorkspaceContext(text) || diagnosticItems.length > 0 || isQaRequest;
   // Speed: Ask questions use a small context (4 files, 30k budget via
   // low-bandwidth mode) — a huge prompt is the main reason CPU answers
   // feel slow. Agent/Build keep the full context.
@@ -1363,6 +1476,20 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     ? await collectContext(text, effectiveMaxFiles, mode === "ask" || cfg.lowBandwidth, { maxFileBytes: cfg.contextMaxFileBytes, maxIndexCharacters: cfg.contextMaxIndexCharacters, maxIndexedFiles: cfg.contextMaxIndexedFiles })
     : { files: [] as any[], summary: "No workspace inspection requested — answering the task directly, without scanning project files." };
   const contextPrompt = inspectWorkspace ? contextToPrompt(ctx.files) : "No workspace files inspected. Answer from the question/task alone.";
+  // Grounded evidence for the two new features (0.9.36): the diagnostics
+  // themselves for /autofix, and the file:line definitions found by scanning
+  // the context files for /qa or a plain codebase question. This goes into
+  // the model prompt AND the offline reply, so the grounding is visible
+  // even when Ollama is offline.
+  let extraContext = "";
+  if (diagnosticItems.length) {
+    extraContext += "\n\n" + buildAutoFixPrompt(diagnosticItems, diagnosticScope) + "\nRULE: propose fixes as FILE blocks for review; NEVER apply a fix without the user's approval.";
+  }
+  if (isQaRequest) {
+    const grounded = buildCodebaseAnswer(text, ctx.files);
+    extraContext += "\n\nGrounded workspace evidence — cite these file:line citations, do not invent others:\n" + grounded.answerText;
+    view?.webview.postMessage({ text: "Codebase Q&A — grounded in the workspace files searched:\n" + grounded.answerText, type: "assistant" });
+  }
   const lang = detectLanguage(text);
   const langNote = lang ? "\nTarget language: " + lang.name + " (main file " + lang.mainFile + ", run with: " + lang.runCommand + "). Use this language only." + fullLanguageGuidance(lang) : "";
   if (inspectWorkspace) {
@@ -1396,6 +1523,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
         ? "Top matching files (open one and ask again once the model is running): " + ctx.files.map((f) => f.path).join(", ")
         : "No files matched that question.",
       "",
+      // Offline grounding (0.9.36): diagnostics + hints, and the codebase
+      // answer, are useful without a model — show them, not just "offline".
+      ...(extraContext ? [extraContext, ""] : []),
       cfg.provider === "gemini"
         ? "To go live: run “Vyntra: Set Gemini API Key” (key from https://aistudio.google.com/app/apikey), select Provider: Gemini, model gemini-3.8-flash, then press Refresh."
         : "To go live: `ollama serve` in a terminal, then `ollama pull qwen2.5-coder:7b` (or another code model), then press Refresh in this panel. You can also point Vyntra at a remote Ollama host in Settings. No GPU setup is needed — Ollama runs on CPU by default.",
@@ -1426,7 +1556,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   }
   const learnedSection = learned.length ? "\n\nLearned answers from you (use these FIRST — they are your own correct answers for this type of question, and they override the model's guess):\n" + learned.map((x) => "Q: " + x.question + "\nA: " + x.answer).join("\n---\n") : "";
   const userTurn: LlmMessage = {
-    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + learnedSection + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + (contextSummary ? "\n\nSummary of earlier chat (already trimmed, use this instead of the dropped messages):\n" + contextSummary : "") + olderSection + "\n" + platformInfo() + modeNote,
+    content: "MODE: " + mode + "\n\nCURRENT USER REQUEST — answer exactly this, do not switch topic:\n" + text + langNote + learnedSection + "\n\nWorkspace context (background only, use only if relevant to the current request):\n" + (inspectWorkspace ? ctx.summary + "\n" + contextPrompt : "None — no workspace files inspected.") + extraContext + (contextSummary ? "\n\nSummary of earlier chat (already trimmed, use this instead of the dropped messages):\n" + contextSummary : "") + olderSection + "\n" + platformInfo() + modeNote,
     role: "user"
   };
   conversationHistory = applyHistory([...conversationHistory, userTurn], cfg.historyCharacters);
@@ -2245,7 +2375,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
       "<div class='autorow'><span>Auto</span><span class='local'>LOCAL</span><span>▾</span><span id='host' style='color:var(--vscode-descriptionForeground)'>checking…</span></div>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button><button id='fastBtn' title='Fast mode: smaller context, faster answers'>Fast</button></div>",
-      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.<br>Skills: /review /test /fix /explain /docs /refactor /commit /security /summarize — type /skills for the list.</span></div>",
+      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.<br>Skills: /review /test /fix /explain /docs /refactor /commit /security /summarize /autofix /qa — type /skills for the list.</span></div>",
       "<div id='setup'>",
       "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat.</p><p style='font-size:12px;color:var(--vscode-descriptionForeground)'>Speed tip: on a normal laptop without a GPU, a 3B model (llama3.2:3b, phi3:mini) answers much faster than a 7B model. The first answer after a download is always slowest — the model has to load into memory first.</p>",
       "<label>Available Ollama models</label><select id='model'><option>qwen2.5-coder:7b</option></select>",
