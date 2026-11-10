@@ -177,6 +177,16 @@
           "description": "How many workspace files to include as context for a question (top matches by name/content).",
           "type": "number"
         },
+        "localNest.inlineCompletion.delayMs": {
+          "default": 300,
+          "description": "Delay in milliseconds after you stop typing before LocalNest asks the local Ollama model for a ghost-text inline completion. Higher values mean fewer model calls; 0 completes as fast as possible.",
+          "type": "number"
+        },
+        "localNest.inlineCompletion.enabled": {
+          "default": true,
+          "description": "Ghost-text inline code completion from your local Ollama model as you type. Accept a suggestion with Tab. Silent when Ollama is unreachable — no popups.",
+          "type": "boolean"
+        },
         "localNest.model": {
           "default": "qwen2.5-coder:7b",
           "description": "Default Ollama model. Any model Ollama supports works (qwen, llama, codellama, deepseek-coder, etc.) \u2014 the chat panel lists the models actually pulled on your host and lets you switch.",
@@ -424,7 +434,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.36",
+  "version": "0.9.37",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

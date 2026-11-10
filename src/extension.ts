@@ -12,6 +12,7 @@ import { checkGemini, geminiChatStream } from "./gemini";
 import { buildLanguageProject, detectLanguage, fullLanguageGuidance, platformInfo } from "./languages";
 import { buildAutoFixPrompt, countBySeverity, DiagnosticItem, fixHintFor, formatDiagnostics } from "./diagnostics";
 import { buildCodebaseAnswer, buildCodebaseQAPrompt, extractQuestionTerms, findDefinitions, isCodebaseQuestion } from "./codebaseQA";
+import { registerInlineCompletion } from "./inlineCompletionProvider";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -472,6 +473,11 @@ export function activate(context: vscode.ExtensionContext) {
       webviewOptions: { retainContextWhenHidden: true }
     })
   );
+
+  // Inline ghost-text completion from the local Ollama model (0.9.37).
+  // Best-effort and fully isolated from chat / agent / autofix / qa:
+  // if registration fails, everything else still activates.
+  try { registerInlineCompletion(context); } catch { /* inline completion is optional */ }
 
   context.subscriptions.push(
     vscode.commands.registerCommand("localNest.openChat", async () => {
