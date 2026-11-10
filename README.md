@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.36, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.37, live on Open VSX |
 | **Editor** | Antigravity |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
