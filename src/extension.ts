@@ -1587,9 +1587,7 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   if (!streamError && full) {
     conversationHistory = applyHistory([...conversationHistory, { content: full, role: "assistant" }], cfg.historyCharacters);
     saveCurrentSession(); postSessions(); postContext(mode); if (lastTrimNotice) { view?.webview.postMessage({ text: lastTrimNotice, type: "assistant" }); lastTrimNotice = ""; }
-    const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
     view?.webview.postMessage({ type: "streamDone" });
-    view?.webview.postMessage({ text: "— " + secs + "s · ~" + estimateTokens(full) + " tokens in this reply (estimate, 1 token ≈ 4 chars) · history: " + conversationHistory.length + " message(s) kept", type: "assistant" });
   }
   if (streamError && String(streamError?.name || "") === "AbortError") {
     view?.webview.postMessage({ text: "Generation stopped by you. The partial reply was not saved to history.", type: "assistant" });
@@ -2364,7 +2362,6 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       ".head{display:flex;align-items:center;gap:10px;padding:12px 12px 4px} .head .logo{font-size:22px} .head b{font-size:16px}",
       ".autorow{display:flex;align-items:center;gap:8px;padding:6px 12px} .autorow .local{background:#0e7490;color:#fff;border-radius:6px;padding:2px 8px;font-size:11px;font-weight:700}",
       ".modes{display:flex;gap:4px;padding:6px 12px;flex-wrap:wrap} .modes button{flex:1;padding:7px 4px;border-radius:8px;border:0;background:transparent;color:var(--vscode-descriptionForeground);cursor:pointer} .modes button.on{background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);font-weight:700} #fastBtn{flex:0 0 auto;padding:7px 10px}",
-      ".intro{margin:8px 12px;padding:12px;border:1px solid var(--vscode-panel-border);border-radius:12px;background:var(--vscode-editor-background)} .intro b{display:block} .intro span{color:var(--vscode-descriptionForeground)}",
       "#setup{margin:8px 12px;padding:12px;border:1px solid var(--vscode-panel-border);border-radius:12px} select,input,textarea{width:100%;box-sizing:border-box;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:8px;padding:8px}",
       "button.primary{width:100%;padding:9px;background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0;border-radius:8px;cursor:pointer;margin-top:8px}",
       "button.small{padding:5px 8px;margin:4px 4px 0 0;background:var(--vscode-button-secondaryBackground);color:var(--vscode-button-secondaryForeground);border:1px solid var(--vscode-button-border);border-radius:6px;cursor:pointer}",
@@ -2381,7 +2378,6 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
       "<div class='autorow'><span>Auto</span><span class='local'>LOCAL</span><span>▾</span><span id='host' style='color:var(--vscode-descriptionForeground)'>checking…</span></div>",
       "<div class='modes'><button data-mode='ask' class='on'>Ask</button><button data-mode='plan'>Plan</button><button data-mode='agent'>Agent</button><button data-mode='build'>Build</button><button id='fastBtn' title='Fast mode: smaller context, faster answers'>Fast</button></div>",
-      "<div class='intro'><b>🪹 Vyntra</b><span>Local AI coding agent · chat, plans, and reviewable changes.<br>Skills: /review /test /fix /explain /docs /refactor /commit /security /summarize /autofix /qa — type /skills for the list.</span></div>",
       "<div id='setup'>",
       "<p><b>Step 1 — Pick a model</b><br>These are Ollama models. Pick one in the single list below, download it, then continue to chat.</p><p style='font-size:12px;color:var(--vscode-descriptionForeground)'>Speed tip: on a normal laptop without a GPU, a 3B model (llama3.2:3b, phi3:mini) answers much faster than a 7B model. The first answer after a download is always slowest — the model has to load into memory first.</p>",
       "<label>Available Ollama models</label><select id='model'><option>qwen2.5-coder:7b</option></select>",

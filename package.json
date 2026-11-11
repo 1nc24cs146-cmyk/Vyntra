@@ -434,7 +434,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.37",
+  "version": "0.9.38",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
