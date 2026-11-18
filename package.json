@@ -184,7 +184,7 @@
         },
         "localNest.inlineCompletion.enabled": {
           "default": true,
-          "description": "Ghost-text inline code completion from your local Ollama model as you type. Accept a suggestion with Tab. Silent when Ollama is unreachable — no popups.",
+          "description": "Ghost-text inline code completion from your local Ollama model as you type. Accept a suggestion with Tab. Silent when Ollama is unreachable \u2014 no popups.",
           "type": "boolean"
         },
         "localNest.model": {
@@ -434,7 +434,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.38",
+  "version": "0.9.39",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
