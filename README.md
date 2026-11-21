@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.39-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.40-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.39, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.40, live on Open VSX |
 | **Editor** | Antigravity |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
@@ -104,13 +104,13 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 
 | Skill | What it does |
 |---|---|
-| `/review` | Reviews code for bugs, security, performance and style, grouped Critical / Major / Minor |
+| `/review` | Reviews code for bugs, security, performance and style, grouped Critical / Major / Minor. `/review staged` reviews exactly what is staged for commit (or just type "review staged changes") |
 | `/test` | Generates tests for the code you give, main path plus edge and failure cases |
 | `/fix` | Explains the cause in a line or two, then gives the corrected code |
 | `/explain` | Explains code in simple steps, then technical detail |
 | `/docs` | Writes documentation / README for the code or project |
 | `/refactor` | Refactors for readability without changing behaviour |
-| `/commit` | Writes a conventional-commit message for a change you describe |
+| `/commit` | Writes a conventional-commit message — straight from the git diff with `/commit` on its own (staged first, then unstaged), or from a change you describe. Also in the Command Palette: "Vyntra: Write Commit Message from Git Diff" |
 | `/security` | Security audit: SQLi, XSS, secrets, weak crypto, SSRF, missing auth, and more, each with a risk level and a secure fix |
 | `/summarize` | Summarises a file, project or workspace |
 | `/autofix` | Auto-fix diagnostics: reads the errors/warnings in the current file (`/autofix all` for the whole workspace) and proposes fixes as reviewable FILE blocks — never applied without your approval. Also in the Command Palette: "Vyntra: Fix Diagnostics (Auto-Fix)". Works offline too: it lists the diagnostics with a hint for each known kind, and the full fix proposal needs Ollama running |
@@ -118,6 +118,11 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 | `/debug` | Debug from an error: paste the error message or stack trace and the code — finds the root cause, explains it, then gives the fix |
 | `/optimize` | Makes code faster: finds the slow parts, explains why they are slow, and gives a faster version with the trade-off |
 | `/translate` | Translates code from one language to another, keeping the behaviour identical, in the target language's own idioms |
+
+## 🆕 What's new in 0.9.40
+
+- **Commit messages from the git diff (`/commit`).** Type `/commit` on its own — no description needed — and LocalNest reads the git diff (staged changes first, unstaged when nothing is staged) and writes a conventional-commit message from it: the scope from the files changed, the type from what the diff does. `/commit staged` forces the staged diff, `/commit all` uses everything vs HEAD. Describing the change still works the old way. Command Palette: "Vyntra: Write Commit Message from Git Diff".
+- **Code review of staged changes (`/review staged`).** Reviews exactly what is about to be committed (`git diff --cached`), grouped Critical / Major / Minor with a concrete fix for each. Just type "review staged changes" in plain words and it does the same. Command Palette: "Vyntra: Review Staged Changes". Both features only read git — nothing is ever staged or committed for you — and if there is nothing staged, or the folder is not a git repo, it says so plainly instead of guessing.
 
 ## 🆕 What's new in 0.9.39
 
@@ -221,6 +226,7 @@ The main commands, all in the Command Palette under "Vyntra: …":
 - Approve All / Discard Proposal / Undo Last Approved Changes / Verify & Fix
 - Refresh Models, Test My Model, Diagnose Chat
 - Set Ollama Host, Set Model
+- Write Commit Message from Git Diff, Review Staged Changes
 
 ## 📄 License
 

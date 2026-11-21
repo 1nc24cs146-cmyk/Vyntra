@@ -13,6 +13,7 @@ import { buildLanguageProject, detectLanguage, fullLanguageGuidance, platformInf
 import { buildAutoFixPrompt, countBySeverity, DiagnosticItem, fixHintFor, formatDiagnostics } from "./diagnostics";
 import { buildCodebaseAnswer, buildCodebaseQAPrompt, extractQuestionTerms, findDefinitions, isCodebaseQuestion } from "./codebaseQA";
 import { registerInlineCompletion } from "./inlineCompletionProvider";
+import { formatGitDiffForPrompt, getGitDiff, GitDiffResult, isCommitMessageRequest, isStagedReviewRequest, parseDiffFiles } from "./git";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -645,6 +646,25 @@ export function activate(context: vscode.ExtensionContext) {
       const question = q.trim();
       setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/qa " + question, type: "prefill" }); }, 400);
     }),
+    vscode.commands.registerCommand("localNest.commitFromDiff", async () => {
+      // Commit message from the git diff (0.9.40): reads the staged diff
+      // (unstaged when nothing is staged) and writes the message from it.
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showWarningMessage("Vyntra: open a project folder first — I read the diff from the open folder."); return; }
+      const diff = await getGitDiff(root, "auto");
+      if (diff.error) { vscode.window.showInformationMessage("Vyntra: " + diff.error); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/commit", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.reviewStaged", async () => {
+      // Code review of staged changes (0.9.40): reviews git diff --cached.
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showWarningMessage("Vyntra: open a project folder first — I read the staged diff from the open folder."); return; }
+      const diff = await getGitDiff(root, "staged");
+      if (diff.error) { vscode.window.showInformationMessage("Vyntra: " + diff.error); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/review staged", type: "prefill" }); }, 400);
+    }),
     vscode.commands.registerCommand("localNest.connectRemote", async () => {
       const url = await vscode.window.showInputBox({ placeHolder: "http://192.168.1.10:11434", prompt: "Remote Ollama host URL (your own host; code is sent only there)" });
       if (!url || !/^https?:\/\//.test(url.trim())) { vscode.window.showWarningMessage("Vyntra: that is not an http(s) URL."); return; }
@@ -795,6 +815,13 @@ function selfTestText(): string {
   const qaMiss = buildCodebaseAnswer("where is nosuchthing defined", qaFiles);
   checks.push("buildCodebaseAnswer not-found says so plainly -> " + (/could not find/i.test(qaMiss.answerText) ? "PASS" : "FAIL"));
   checks.push("buildCodebaseQAPrompt forbids inventing -> " + (buildCodebaseQAPrompt("where is x defined", []).includes("do not guess") ? "PASS" : "FAIL"));
+  // Git diff features (0.9.40)
+  const sampleDiff = "diff --git a/src/a.ts b/src/a.ts\nindex 111..222 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/README.md b/README.md\nindex 333..444 100644\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-x\n+y\n";
+  const parsedFiles = parseDiffFiles(sampleDiff);
+  checks.push("parseDiffFiles finds both files in order -> " + (parsedFiles.length === 2 && parsedFiles[0] === "src/a.ts" && parsedFiles[1] === "README.md" ? "PASS" : "FAIL"));
+  checks.push("isStagedReviewRequest 'review staged changes' -> " + (isStagedReviewRequest("review staged changes") && isStagedReviewRequest("Review my staged") && !isStagedReviewRequest("review this file") ? "PASS" : "FAIL"));
+  checks.push("isCommitMessageRequest 'write a commit message' -> " + (isCommitMessageRequest("write a commit message") && !isCommitMessageRequest("write a commit message for the login fix") ? "PASS" : "FAIL"));
+  checks.push("formatGitDiffForPrompt labels scope + files -> " + (formatGitDiffForPrompt({ diff: sampleDiff, error: "", files: parsedFiles, scope: "staged", scopeLabel: "staged changes", truncated: false }).includes("staged changes") && formatGitDiffForPrompt({ diff: sampleDiff, error: "", files: parsedFiles, scope: "staged", scopeLabel: "staged changes", truncated: false }).includes("src/a.ts") ? "PASS" : "FAIL"));
   return checks.join("\n");
 }
 async function tryAutoStartOllama(host: string): Promise<void> {
@@ -1167,13 +1194,13 @@ async function refreshStatus(showToast: boolean): Promise<{ models: string[]; on
 // works with the user's local Ollama model only.
 type Skill = { description: string; prompt: string };
 const SKILLS: Record<string, Skill> = {
-  review: { description: "Review code for bugs, security, performance and style", prompt: "You are doing a CODE REVIEW. Group findings as Critical / Major / Minor, each with the file or code it refers to and a concrete fix suggestion. Do not rewrite whole files unless the user asked for a rewrite." },
+  review: { description: "Review code for bugs, security, performance and style — or /review staged to review exactly what is staged for commit", prompt: "You are doing a CODE REVIEW. Group findings as Critical / Major / Minor, each with the file or code it refers to and a concrete fix suggestion. Do not rewrite whole files unless the user asked for a rewrite." },
   test: { description: "Generate tests for the given code", prompt: "Generate TESTS for the code given. Cover the main path, edge cases and failure cases. Use the project's own test style if the workspace context shows one, otherwise a plain, runnable test file. Output code in code blocks; in Agent/Build mode output as FILE blocks for review." },
   fix: { description: "Fix bugs / diagnostics in the given code", prompt: "FIX the bug or diagnostic in the code given. Explain the cause in one or two lines first, then give the corrected code. Do not change unrelated behaviour." },
   explain: { description: "Explain code in simple steps", prompt: "EXPLAIN the code given in simple steps: what it does, how it works, and its edge cases. Use plain language first, then technical detail. Do not rewrite the code unless asked." },
   docs: { description: "Write documentation / README for the given code or project", prompt: "Write DOCUMENTATION for the code or project given: what it does, how to run it, its main files and commands, and an example. Keep it clear and short, in Markdown." },
   refactor: { description: "Refactor code without changing what it does", prompt: "REFACTOR the code given for readability and maintainability, without changing its behaviour. Keep every public name and output the same unless the user asked otherwise. Say what you changed and why." },
-  commit: { description: "Write a commit message for a described change", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. If no change is described, say what information is missing instead of inventing one." },
+  commit: { description: "Write a commit message — from the git diff with /commit on its own (staged first, then unstaged), or from a change you describe", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. When a git diff is given, base the message ONLY on that diff — the scope comes from the files changed, the type from what the diff does — and never invent a change that is not in it. If no change is described and no diff is given, say what information is missing instead of inventing one." },
   security: { description: "Security audit: SQLi, XSS, secrets, auth, crypto, SSRF, etc.", prompt: "Do a SECURITY AUDIT of the code given. Check SQL injection, command injection, XSS, hardcoded secrets, weak crypto, insecure random, unsafe deserialisation, path traversal, SSRF, debug mode and missing auth. Give each finding a risk level (Critical/High/Medium/Low), the risky code, and a secure fix. If nothing is risky, say so plainly." },
   summarize: { description: "Summarise a file, project or workspace", prompt: "SUMMARISE what was given: purpose, main parts, how they fit together, and anything important or risky. Keep it short and structured. Do not invent files or features that are not in the context." },
   autofix: { description: "Auto-fix diagnostics: fix the errors/warnings in the current file (or workspace with 'all') as reviewable FILE blocks — never applied without your approval", prompt: "AUTO-FIX DIAGNOSTICS. Fix EVERY diagnostic listed in the request, errors first, then warnings. For each one, explain the cause in one line, then give the corrected code. In Agent/Build mode output the corrected files ONLY as ### FILE: blocks, so each fix goes through the normal review-and-approve flow — NEVER claim a fix has been applied, and NEVER write a file yourself. Change only the lines needed to fix the diagnostics; do not change unrelated behaviour. If a diagnostic cannot be fixed from the context given, say which one and what file you would need, instead of guessing." },
@@ -1361,11 +1388,17 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   }
   // Slash skills: "/review ..." etc. Handled before anything else, so a
   // skill never gets mistaken for a normal question, and /skills lists them.
+  // Plain-words forms of the two git features (0.9.40): "review staged
+  // changes" means /review staged, and "write a commit message" means
+  // /commit with no description — the message comes from the git diff.
+  if (isStagedReviewRequest(text)) { text = "/review staged"; }
+  else if (isCommitMessageRequest(text)) { text = "/commit"; }
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
   let skillPrompt: string | undefined;
   // Auto-fix diagnostics (0.9.36) and codebase Q&A (0.9.36) state, carried
   // from the slash handling below into the model call further down.
   let diagnosticItems: DiagnosticItem[] = [];
+  let gitDiff: GitDiffResult | null = null;
   let diagnosticScope = "";
   let isQaRequest = false;
   let slashHandled = false;
@@ -1427,6 +1460,53 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       skillPrompt = SKILLS.qa.prompt;
       text = slash[2].trim();
       slashHandled = true;
+    }
+    // Commit messages from the git diff (0.9.40): "/commit" with no
+    // description reads the diff — staged first, unstaged when nothing is
+    // staged — and writes the message from it. "/commit staged" forces the
+    // staged diff; "/commit all" uses everything vs HEAD. A description
+    // still works the old way (falls through to the generic handler below).
+    if (name === "commit") {
+      const arg = slash[2].trim();
+      if (!arg || /^(staged|unstaged|all|diff|working)$/i.test(arg)) {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!root) {
+          view?.webview.postMessage({ text: "Commit message from diff: open a project folder first — I read the diff from the open folder. Or describe the change and I will write the message from that instead.", type: "assistant" });
+          return;
+        }
+        const scope = /staged/i.test(arg) ? "staged" as const : /unstaged|working/i.test(arg) ? "unstaged" as const : /all/i.test(arg) ? "all" as const : "auto" as const;
+        gitDiff = await getGitDiff(root, scope);
+        if (gitDiff.error) {
+          view?.webview.postMessage({ text: "Commit message from diff: " + gitDiff.error, type: "assistant" });
+          return;
+        }
+        view?.webview.postMessage({ text: "Commit message from the " + gitDiff.scopeLabel + " — " + gitDiff.files.length + " file(s): " + gitDiff.files.join(", ") + ". Writing the message from the diff itself.", type: "assistant" });
+        skillPrompt = SKILLS.commit.prompt;
+        text = "Write a commit message for the git diff below.";
+        slashHandled = true;
+      }
+    }
+    // Code review of staged changes (0.9.40): "/review staged" reviews
+    // exactly what is about to be committed (git diff --cached), grouped
+    // Critical / Major / Minor like any other review.
+    if (name === "review") {
+      const arg = slash[2].trim();
+      if (/^staged(\s+changes?)?$/i.test(arg)) {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!root) {
+          view?.webview.postMessage({ text: "Review staged changes: open a project folder first — I read the staged diff from the open folder.", type: "assistant" });
+          return;
+        }
+        gitDiff = await getGitDiff(root, "staged");
+        if (gitDiff.error) {
+          view?.webview.postMessage({ text: "Review staged changes: " + gitDiff.error + "\nTip: /review with the code pasted reviews that code instead.", type: "assistant" });
+          return;
+        }
+        view?.webview.postMessage({ text: "Reviewing the staged changes — " + gitDiff.files.length + " file(s): " + gitDiff.files.join(", ") + ". Findings grouped Critical / Major / Minor, with a concrete fix for each.", type: "assistant" });
+        skillPrompt = SKILLS.review.prompt;
+        text = "Review the staged changes in the git diff below.";
+        slashHandled = true;
+      }
     }
     if (!slashHandled) {
     const skill = allSkills[name];
@@ -1493,6 +1573,9 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   let extraContext = "";
   if (diagnosticItems.length) {
     extraContext += "\n\n" + buildAutoFixPrompt(diagnosticItems, diagnosticScope) + "\nRULE: propose fixes as FILE blocks for review; NEVER apply a fix without the user's approval.";
+  }
+  if (gitDiff) {
+    extraContext += "\n\n" + formatGitDiffForPrompt(gitDiff) + "\nRULE: base the answer ONLY on this diff — do not invent changes that are not in it.";
   }
   if (isQaRequest) {
     const grounded = buildCodebaseAnswer(text, ctx.files);

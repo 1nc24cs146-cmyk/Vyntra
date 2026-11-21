@@ -134,6 +134,14 @@
         "title": "Vyntra: Ask About Your Codebase"
       },
       {
+        "command": "localNest.commitFromDiff",
+        "title": "Vyntra: Write Commit Message from Git Diff"
+      },
+      {
+        "command": "localNest.reviewStaged",
+        "title": "Vyntra: Review Staged Changes"
+      },
+      {
         "command": "localNest.connectRemote",
         "title": "Vyntra: Connect to Remote Ollama Host"
       },
@@ -434,7 +442,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.39",
+  "version": "0.9.40",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",
