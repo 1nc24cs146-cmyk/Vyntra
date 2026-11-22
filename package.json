@@ -31,6 +31,13 @@
     "onCommand:localNest.configureRemote",
     "onCommand:localNest.openAgent",
     "onCommand:localNest.newConversation",
+    "onCommand:localNest.commitFromDiff",
+    "onCommand:localNest.reviewStaged",
+    "onCommand:localNest.connectGitHub",
+    "onCommand:localNest.disconnectGitHub",
+    "onCommand:localNest.githubStatus",
+    "onCommand:localNest.pushToGitHub",
+    "onCommand:localNest.publishToGitHub",
     "onStartupFinished",
     "onChatParticipant:localNest"
   ],
@@ -140,6 +147,26 @@
       {
         "command": "localNest.reviewStaged",
         "title": "Vyntra: Review Staged Changes"
+      },
+      {
+        "command": "localNest.connectGitHub",
+        "title": "Vyntra: Connect GitHub Account"
+      },
+      {
+        "command": "localNest.disconnectGitHub",
+        "title": "Vyntra: Disconnect GitHub Account"
+      },
+      {
+        "command": "localNest.githubStatus",
+        "title": "Vyntra: Show GitHub Status"
+      },
+      {
+        "command": "localNest.pushToGitHub",
+        "title": "Vyntra: Push Changes to GitHub"
+      },
+      {
+        "command": "localNest.publishToGitHub",
+        "title": "Vyntra: Publish Project to GitHub"
       },
       {
         "command": "localNest.connectRemote",
@@ -356,6 +383,11 @@
           "default": "",
           "description": "Preferred model id for edit/fix selection tasks. Leave blank to use the provider's default model.",
           "type": "string"
+        },
+        "localNest.github.defaultPrivate": {
+          "default": true,
+          "description": "When /publish creates a GitHub repository, make it Private by default. The publish flow still asks Private/Public each time — this only sets which option is pre-selected.",
+          "type": "boolean"
         }
       },
       "title": "Vyntra"
@@ -442,7 +474,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.40",
+  "version": "0.9.41",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

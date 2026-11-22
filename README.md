@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.40-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.41-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.40, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.41, live on Open VSX |
 | **Editor** | Antigravity |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
@@ -118,6 +118,16 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 | `/debug` | Debug from an error: paste the error message or stack trace and the code — finds the root cause, explains it, then gives the fix |
 | `/optimize` | Makes code faster: finds the slow parts, explains why they are slow, and gives a faster version with the trade-off |
 | `/translate` | Translates code from one language to another, keeping the behaviour identical, in the target language's own idioms |
+| `/github` | GitHub account: `/github connect` links your account with a personal access token, `/github status` shows the connection and this folder's git state, `/github disconnect` forgets the token. A Connect GitHub button sits at the top of the panel too |
+| `/push` | Pushes this project's changes to GitHub: writes the commit message from your changes (like `/commit`), shows it to you, and waits for you to reply `push it` — nothing is committed or pushed until you say so. If only commits are waiting, it pushes those. Also in the Command Palette: "Vyntra: Push Changes to GitHub" |
+| `/publish` | Publishes this whole project to GitHub as a new repository: asks the repo name and Private/Public first, creates it on your account, then pushes the project to it. Also in the Command Palette: "Vyntra: Publish Project to GitHub" |
+
+## 🆕 What's new in 0.9.41
+
+- **GitHub in LocalNest (`/github`, `/push`, `/publish`).** Connect your GitHub account once with `/github connect` — paste a personal access token (classic token with the `repo` scope, from github.com/settings/tokens) and LocalNest checks it belongs to you before storing it. The token lives only in the editor's secure storage, never in a file or in settings, and git authenticates through a per-push credential helper, so the token never appears in a command line, a remote URL, or an error message.
+- **Push changes (`/push`).** Writes the commit message from your changes, shows it to you, and waits for you to reply `push it` — staging, committing, and pushing only happen after that. If only finished commits are waiting, it pushes those instead. Just type "push to github" in plain words and it does the same. Command Palette: "Vyntra: Push Changes to GitHub".
+- **Publish a project (`/publish`).** Puts this whole project on GitHub as a new repository: it asks the repo name (defaults to the folder name) and Private/Public, confirms once, then creates the repo on your account, sets it as the remote, and pushes. If the project is already on GitHub, it says so and points you to `/push` instead. Command Palette: "Vyntra: Publish Project to GitHub".
+- **GitHub status in the panel.** A GitHub row at the top of the chat panel shows whether you are connected (and as who), with a Connect/Disconnect button. `/github status` shows the connection plus this folder's branch, remote, and unpushed/uncommitted changes.
 
 ## 🆕 What's new in 0.9.40
 
@@ -227,6 +237,7 @@ The main commands, all in the Command Palette under "Vyntra: …":
 - Refresh Models, Test My Model, Diagnose Chat
 - Set Ollama Host, Set Model
 - Write Commit Message from Git Diff, Review Staged Changes
+- Connect GitHub Account, Disconnect GitHub Account, Show GitHub Status, Push Changes to GitHub, Publish Project to GitHub
 
 ## 📄 License
 

@@ -14,6 +14,7 @@ import { buildAutoFixPrompt, countBySeverity, DiagnosticItem, fixHintFor, format
 import { buildCodebaseAnswer, buildCodebaseQAPrompt, extractQuestionTerms, findDefinitions, isCodebaseQuestion } from "./codebaseQA";
 import { registerInlineCompletion } from "./inlineCompletionProvider";
 import { formatGitDiffForPrompt, getGitDiff, GitDiffResult, isCommitMessageRequest, isStagedReviewRequest, parseDiffFiles } from "./git";
+import { buildCredentialHelper, checkGitHubRepo, commitStaged, createGitHubRepo, formatRepoState, getGitHubUser, getRepoState, GITHUB_TOKEN_KEY, GITHUB_TOKEN_URL, initRepo, isGitHubConnectRequest, isGitHubDisconnectRequest, isGitHubStatusRequest, isPublishToGitHubRequest, isPushConfirm, isPushToGitHubRequest, parseGitHubRemote, pushCurrentBranch, redactSecrets, sanitizeRepoName, setRemoteOrigin, stageAll } from "./github";
 
 type Mode = "ask" | "plan" | "agent" | "build";
 
@@ -665,6 +666,27 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand("localNest.chat.focus");
       setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/review staged", type: "prefill" }); }, 400);
     }),
+    vscode.commands.registerCommand("localNest.connectGitHub", async () => {
+      // GitHub in LocalNest (0.9.41): link the account with a token.
+      await connectGitHub();
+    }),
+    vscode.commands.registerCommand("localNest.disconnectGitHub", async () => {
+      await disconnectGitHub();
+    }),
+    vscode.commands.registerCommand("localNest.githubStatus", async () => {
+      await githubStatusReply();
+    }),
+    vscode.commands.registerCommand("localNest.pushToGitHub", async () => {
+      // Push to GitHub (0.9.41): prefill /push in chat — the message is
+      // written from the diff there, then waits for a "push it" reply.
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/push", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.publishToGitHub", async () => {
+      // Publish this project to GitHub (0.9.41): prefill /publish in chat.
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/publish", type: "prefill" }); }, 400);
+    }),
     vscode.commands.registerCommand("localNest.connectRemote", async () => {
       const url = await vscode.window.showInputBox({ placeHolder: "http://192.168.1.10:11434", prompt: "Remote Ollama host URL (your own host; code is sent only there)" });
       if (!url || !/^https?:\/\//.test(url.trim())) { vscode.window.showWarningMessage("Vyntra: that is not an http(s) URL."); return; }
@@ -822,6 +844,13 @@ function selfTestText(): string {
   checks.push("isStagedReviewRequest 'review staged changes' -> " + (isStagedReviewRequest("review staged changes") && isStagedReviewRequest("Review my staged") && !isStagedReviewRequest("review this file") ? "PASS" : "FAIL"));
   checks.push("isCommitMessageRequest 'write a commit message' -> " + (isCommitMessageRequest("write a commit message") && !isCommitMessageRequest("write a commit message for the login fix") ? "PASS" : "FAIL"));
   checks.push("formatGitDiffForPrompt labels scope + files -> " + (formatGitDiffForPrompt({ diff: sampleDiff, error: "", files: parsedFiles, scope: "staged", scopeLabel: "staged changes", truncated: false }).includes("staged changes") && formatGitDiffForPrompt({ diff: sampleDiff, error: "", files: parsedFiles, scope: "staged", scopeLabel: "staged changes", truncated: false }).includes("src/a.ts") ? "PASS" : "FAIL"));
+  // GitHub in LocalNest (0.9.41)
+  checks.push("parseGitHubRemote https/ssh/other -> " + (parseGitHubRemote("https://github.com/owner/repo.git")?.repo === "repo" && parseGitHubRemote("git@github.com:owner/repo")?.owner === "owner" && parseGitHubRemote("https://gitlab.com/owner/repo") === null && parseGitHubRemote("/tmp/local-repo") === null ? "PASS" : "FAIL"));
+  checks.push("sanitizeRepoName 'My Cool App!' -> " + (sanitizeRepoName("My Cool App!") === "my-cool-app" ? "PASS" : "FAIL"));
+  checks.push("isPushToGitHubRequest / isPublishToGitHubRequest -> " + (isPushToGitHubRequest("push to github") && isPushToGitHubRequest("push my changes") && isPublishToGitHubRequest("upload my project to github") && !isPushToGitHubRequest("push the button") ? "PASS" : "FAIL"));
+  checks.push("isPushConfirm 'push it' -> " + (isPushConfirm("push it") && isPushConfirm("yes, push") && !isPushConfirm("push it to production") ? "PASS" : "FAIL"));
+  checks.push("buildCredentialHelper answers from env, never argv -> " + (buildCredentialHelper().includes("LN_GH_TOKEN") && buildCredentialHelper().startsWith("!f()") ? "PASS" : "FAIL"));
+  checks.push("redactSecrets strips the token -> " + (redactSecrets("failed for ghp_abc123 here", "ghp_abc123") === "failed for [token] here" ? "PASS" : "FAIL"));
   return checks.join("\n");
 }
 async function tryAutoStartOllama(host: string): Promise<void> {
@@ -1118,6 +1147,8 @@ async function listDesktopFiles() {
 }
 
 async function refreshStatus(showToast: boolean): Promise<{ models: string[]; online: boolean }> {
+  // GitHub row (0.9.41): keep the Connect/Disconnect button honest.
+  void refreshGitHubStatus();
   const cfg = getConfig();
   if (cfg.provider === "gemini") {
     const key = await getGeminiKey();
@@ -1208,6 +1239,9 @@ const SKILLS: Record<string, Skill> = {
   debug: { description: "Debug from an error: paste the error message or stack trace and the code — find the root cause, explain it, then give the fix", prompt: "DEBUG this failure. The user pasted an error message and/or stack trace with code. First find the ROOT CAUSE — the exact line and why it fails — and explain it in one or two plain lines. Then give the corrected code, changing only what fixes the cause. If the error alone does not pin the cause down, say what is missing (which input, which file, which line) instead of guessing. In Agent/Build mode output the corrected files ONLY as ### FILE: blocks, so each fix goes through the normal review-and-approve flow." },
   optimize: { description: "Make code faster: find the slow parts, explain why they are slow, and give a faster version with the trade-off", prompt: "OPTIMIZE this code for performance. Find the slow parts first — wasteful loops, repeated work, N+1 queries, needless allocations, blocking I/O — and name each one with the line it sits on. Then give a faster version, keeping the behaviour identical, and say what the trade-off is (memory, readability, complexity) for each change. Do not micro-optimise code that is already fast enough; if nothing is slow, say so plainly. In Agent/Build mode output the changed files ONLY as ### FILE: blocks." },
   translate: { description: "Translate code from one language to another, keeping the behaviour identical, in the target language's own idioms", prompt: "TRANSLATE this code into the target language the user named (ask which one if they did not name it). Keep the behaviour identical: same inputs, same outputs, same edge cases. Use the target language's own idioms, standard library and project files (e.g. go.mod, Cargo.toml, requirements.txt, package.json) — do not transliterate the source language's style. If a library has no direct equivalent, say which one you used instead and why. In Agent/Build mode output the translated files ONLY as ### FILE: blocks." },
+  github: { description: "GitHub account: /github connect to link your account, /github status to see the connection + this folder, /github disconnect to forget the token", prompt: "" },
+  push: { description: "Push to GitHub: writes the commit message from your changes, then waits for you to reply 'push it' — nothing is committed or pushed without that", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. When a git diff is given, base the message ONLY on that diff — the scope comes from the files changed, the type from what the diff does — and never invent a change that is not in it." },
+  publish: { description: "Publish this project to GitHub: creates the repository on your account and pushes the project to it — asks the name and Private/Public first", prompt: "" },
 };
 function skillsHelpText(): string {
   return "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
@@ -1365,6 +1399,331 @@ function collectEditorDiagnostics(scope: "file" | "workspace"): DiagnosticItem[]
   items.sort((a, b) => (a.severity === "error" ? 0 : a.severity === "warning" ? 1 : 2) - (b.severity === "error" ? 0 : b.severity === "warning" ? 1 : 2) || a.file.localeCompare(b.file) || a.line - b.line);
   return items.slice(0, 50);
 }
+
+// --- GitHub in LocalNest (0.9.41) ---
+// Connect a GitHub account with a personal access token, push changes, and
+// publish a project — all from the chat panel. The token lives ONLY in the
+// editor's Secret Storage, never in settings, files, or chat history, and
+// git push authenticates through GIT_ASKPASS (see src/github.ts), so the
+// token never appears in a command line or a remote URL. Nothing is
+// committed, pushed, or published without the user confirming in the chat
+// first: /push waits for a "push it" reply, /publish asks the repo name +
+// Private/Public and then a final confirm.
+let githubLoginCache: string | null = null;
+// A push waiting on the user's "push it" — message already written from
+// the diff (or typed by the user when Ollama is offline). Expires after
+// 10 minutes so a stale "push it" can never fire later by accident.
+let pendingPush: { branch: string; cwd: string; message: string; remote: string; when: number } | null = null;
+
+async function getGitHubToken(): Promise<string | undefined> {
+  try {
+    return await secretStorage?.get(GITHUB_TOKEN_KEY);
+  } catch {
+    return undefined;
+  }
+}
+
+async function refreshGitHubStatus(): Promise<void> {
+  const token = await getGitHubToken();
+  view?.webview.postMessage({ connected: !!token, login: githubLoginCache || "", type: "githubStatus" });
+}
+
+async function connectGitHub(): Promise<void> {
+  const existing = await getGitHubToken();
+  if (existing) {
+    const who = await getGitHubUser(existing);
+    if (who.data) {
+      githubLoginCache = who.data.login;
+      view?.webview.postMessage({ text: "GitHub is already connected as @" + who.data.login + ". Push with /push, publish a new project with /publish, or /github disconnect to forget the token.", type: "assistant" });
+    } else {
+      view?.webview.postMessage({ text: "A GitHub token is stored, but GitHub rejected it: " + who.error + "\nConnect again with a fresh token below.", type: "assistant" });
+    }
+    await refreshGitHubStatus();
+    if (who.data) {
+      return;
+    }
+  }
+  view?.webview.postMessage({ text: "To connect GitHub, paste a personal access token (classic token with the `repo` scope, or a fine-grained token with Contents read + write). Create one at " + GITHUB_TOKEN_URL + " — it is stored only in this editor's secure storage, never in a file or in settings.", type: "assistant" });
+  const token = await vscode.window.showInputBox({
+    password: true,
+    placeHolder: "ghp_... or github_pat_...",
+    prompt: "Paste your GitHub personal access token (repo scope). Create one at " + GITHUB_TOKEN_URL
+  });
+  if (!token || !token.trim()) {
+    return;
+  }
+  const user = await getGitHubUser(token.trim());
+  if (user.error || !user.data) {
+    view?.webview.postMessage({ text: "That token did not work: " + (user.error || "GitHub did not return an account.") + "\nCheck the token was copied in full and has the `repo` scope, then try /github connect again.", type: "assistant" });
+    return;
+  }
+  await secretStorage?.store(GITHUB_TOKEN_KEY, token.trim());
+  githubLoginCache = user.data.login;
+  view?.webview.postMessage({ text: "Connected to GitHub as @" + user.data.login + " ✓\nThe token is stored only in secure storage. Now you can:\n/push — push this project's changes to GitHub\n/publish — put this whole project on GitHub as a new repository\n/github status — see the connection and this folder's git state", type: "assistant" });
+  await refreshGitHubStatus();
+}
+
+async function disconnectGitHub(): Promise<void> {
+  await secretStorage?.delete(GITHUB_TOKEN_KEY);
+  githubLoginCache = null;
+  pendingPush = null;
+  view?.webview.postMessage({ text: "Disconnected from GitHub — the token was deleted from secure storage. Connect again any time with /github connect.", type: "assistant" });
+  await refreshGitHubStatus();
+}
+
+async function githubStatusReply(): Promise<void> {
+  const token = await getGitHubToken();
+  if (!token) {
+    view?.webview.postMessage({ text: "GitHub: not connected.\nConnect with /github connect — you will paste a personal access token (repo scope) from " + GITHUB_TOKEN_URL + ".", type: "assistant" });
+    return;
+  }
+  let login = githubLoginCache;
+  if (!login) {
+    const who = await getGitHubUser(token);
+    if (who.data) {
+      login = who.data.login;
+      githubLoginCache = login;
+    }
+  }
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  let repoLine = "No project folder is open.";
+  if (root) {
+    const s = await getRepoState(root);
+    repoLine = "This folder: " + formatRepoState(s) + (s.remoteOwner && s.remoteRepo ? "\nhttps://github.com/" + s.remoteOwner + "/" + s.remoteRepo : "");
+  }
+  view?.webview.postMessage({ text: "GitHub: connected" + (login ? " as @" + login : "") + ".\n" + repoLine + "\n\nPush changes with /push — publish a new project with /publish.", type: "assistant" });
+}
+
+async function startPushFlow(): Promise<void> {
+  const token = await getGitHubToken();
+  if (!token) {
+    view?.webview.postMessage({ text: "Push to GitHub: connect your GitHub account first — type /github connect and paste a personal access token (repo scope) from " + GITHUB_TOKEN_URL + ".", type: "assistant" });
+    return;
+  }
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {
+    view?.webview.postMessage({ text: "Push to GitHub: open a project folder first.", type: "assistant" });
+    return;
+  }
+  let login = githubLoginCache;
+  if (!login) {
+    const who = await getGitHubUser(token);
+    if (!who.data) {
+      view?.webview.postMessage({ text: "Push to GitHub: " + who.error, type: "assistant" });
+      return;
+    }
+    login = who.data.login;
+    githubLoginCache = login;
+  }
+  const state = await getRepoState(root);
+  if (state.error) {
+    view?.webview.postMessage({ text: "Push to GitHub: " + state.error, type: "assistant" });
+    return;
+  }
+  if (!state.remoteUrl) {
+    view?.webview.postMessage({ text: "Push to GitHub: this project has no remote yet — publish it first with /publish, which creates the GitHub repository and pushes this project to it.", type: "assistant" });
+    return;
+  }
+  if (!state.remoteOwner || !state.remoteRepo) {
+    view?.webview.postMessage({ text: "Push to GitHub: this project's remote is not GitHub (" + state.remoteUrl + ") — /push only pushes to a GitHub remote.", type: "assistant" });
+    return;
+  }
+  if (!state.hasChanges && !state.hasUnpushed) {
+    view?.webview.postMessage({ text: "Nothing to push — " + state.branch + " is already up to date with " + state.remoteOwner + "/" + state.remoteRepo + " and the working tree is clean.", type: "assistant" });
+    return;
+  }
+  const remote = "https://github.com/" + state.remoteOwner + "/" + state.remoteRepo;
+  // Unpushed commits only — no message needed, just confirm and push.
+  if (!state.hasChanges && state.hasUnpushed) {
+    pendingPush = { branch: state.branch, cwd: root, message: "", remote, when: Date.now() };
+    view?.webview.postMessage({ text: "Ready to push: " + state.ahead + " commit(s) on " + state.branch + " not on GitHub yet (" + remote + ").\nReply `push it` and I will push them now — nothing is pushed until you say so.", type: "assistant" });
+    return;
+  }
+  // There are uncommitted changes — write the commit message from the diff.
+  const diff = await getGitDiff(root, "auto");
+  if (diff.error) {
+    view?.webview.postMessage({ text: "Push to GitHub: " + diff.error, type: "assistant" });
+    return;
+  }
+  const cfg = getConfig();
+  let message = "";
+  if (await providerOnline(cfg)) {
+    view?.webview.postMessage({ text: "Writing the commit message from your changes (" + diff.files.length + " file(s): " + diff.files.join(", ") + ")…", type: "assistant" });
+    message = (await chatOnce(cfg, [
+      { content: systemPrompt("ask", SKILLS.commit.prompt), role: "system" },
+      { content: "Write a commit message for the git diff below.\n\n" + formatGitDiffForPrompt(diff), role: "user" }
+    ])).trim();
+  } else {
+    const typed = await vscode.window.showInputBox({ placeHolder: "e.g. fix: handle empty staged diff in /commit", prompt: "Ollama is offline, so I cannot write the commit message — type it (conventional-commit style: feat/fix/docs/...)" });
+    if (!typed || !typed.trim()) {
+      view?.webview.postMessage({ text: "Push cancelled — no commit message given. Run /push again when you are ready.", type: "assistant" });
+      return;
+    }
+    message = typed.trim();
+  }
+  if (!message) {
+    view?.webview.postMessage({ text: "Push cancelled — no commit message came back from the model. Run /push again to retry.", type: "assistant" });
+    return;
+  }
+  pendingPush = { branch: state.branch, cwd: root, message, remote, when: Date.now() };
+  view?.webview.postMessage({ text: "Ready to push to " + remote + " (branch " + state.branch + "):\n\nCommit message:\n" + message + "\n\nReply `push it` and I will stage, commit, and push — nothing is committed or pushed until you say so. (Waiting pushes expire after 10 minutes.)", type: "assistant" });
+}
+
+async function confirmPendingPush(): Promise<void> {
+  if (!pendingPush || Date.now() - pendingPush.when > 10 * 60 * 1000) {
+    pendingPush = null;
+    view?.webview.postMessage({ text: "Nothing is waiting to be pushed — run /push first, then reply `push it` when the commit message looks right.", type: "assistant" });
+    return;
+  }
+  const p = pendingPush;
+  pendingPush = null;
+  const token = await getGitHubToken();
+  if (!token) {
+    view?.webview.postMessage({ text: "GitHub is no longer connected — /github connect first, then run /push again.", type: "assistant" });
+    return;
+  }
+  const who = await getGitHubUser(token);
+  if (!who.data) {
+    view?.webview.postMessage({ text: "Push: " + who.error, type: "assistant" });
+    return;
+  }
+  githubLoginCache = who.data.login;
+  if (p.message) {
+    view?.webview.postMessage({ text: "Pushing — staging, committing, then pushing to origin/" + p.branch + "…", type: "assistant" });
+    const stageErr = await stageAll(p.cwd);
+    if (stageErr) {
+      view?.webview.postMessage({ text: "Push: " + stageErr, type: "assistant" });
+      return;
+    }
+    const commit = await commitStaged(p.cwd, p.message);
+    if (commit.error) {
+      view?.webview.postMessage({ text: "Push: " + commit.error, type: "assistant" });
+      return;
+    }
+    view?.webview.postMessage({ text: "Committed" + (commit.hash ? " (" + commit.hash + ")" : "") + " — pushing to GitHub…", type: "assistant" });
+  } else {
+    view?.webview.postMessage({ text: "Pushing " + p.branch + " to GitHub…", type: "assistant" });
+  }
+  const pushErr = await pushCurrentBranch(p.cwd, p.branch, who.data.login, token);
+  if (pushErr) {
+    view?.webview.postMessage({ text: "Push: " + redactSecrets(pushErr, token), type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Pushed ✓ — " + p.branch + " is now on GitHub: " + p.remote, type: "assistant" });
+}
+
+async function startPublishFlow(): Promise<void> {
+  const token = await getGitHubToken();
+  if (!token) {
+    view?.webview.postMessage({ text: "Publish to GitHub: connect your GitHub account first — type /github connect and paste a personal access token (repo scope) from " + GITHUB_TOKEN_URL + ".", type: "assistant" });
+    return;
+  }
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {
+    view?.webview.postMessage({ text: "Publish to GitHub: open a project folder first.", type: "assistant" });
+    return;
+  }
+  let login = githubLoginCache;
+  if (!login) {
+    const who = await getGitHubUser(token);
+    if (!who.data) {
+      view?.webview.postMessage({ text: "Publish to GitHub: " + who.error, type: "assistant" });
+      return;
+    }
+    login = who.data.login;
+    githubLoginCache = login;
+  }
+  const state = await getRepoState(root);
+  if (state.error && state.error.indexOf("not a git repository") < 0) {
+    view?.webview.postMessage({ text: "Publish to GitHub: " + state.error, type: "assistant" });
+    return;
+  }
+  if (state.remoteOwner && state.remoteRepo) {
+    view?.webview.postMessage({ text: "This project is already on GitHub at https://github.com/" + state.remoteOwner + "/" + state.remoteRepo + " — push new changes with /push instead.", type: "assistant" });
+    return;
+  }
+  if (state.remoteUrl) {
+    view?.webview.postMessage({ text: "This project already has a remote that is not GitHub (" + state.remoteUrl + ") — /publish only creates GitHub repositories.", type: "assistant" });
+    return;
+  }
+  // Nothing to upload yet — say so before creating a repo on GitHub.
+  let hasFiles = state.isRepo && (state.hasChanges || state.hasCommits);
+  if (!state.isRepo) {
+    try {
+      const entries = await vscode.workspace.fs.readDirectory(vscode.Uri.file(root));
+      hasFiles = entries.length > 0;
+    } catch {
+      hasFiles = false;
+    }
+  }
+  if (!hasFiles) {
+    view?.webview.postMessage({ text: "Publish to GitHub: this folder is empty — add a file first, then run /publish again.", type: "assistant" });
+    return;
+  }
+  const folderName = root.split(/[\\/]/).filter(Boolean).pop() || "my-project";
+  const name = await vscode.window.showInputBox({
+    prompt: "Repository name on GitHub (your account: @" + login + ")",
+    validateInput: (v) => v.trim() && /^[A-Za-z0-9._-]+$/.test(v.trim()) ? undefined : "Letters, digits, - _ . only — no spaces.",
+    value: sanitizeRepoName(folderName)
+  });
+  if (!name || !name.trim()) {
+    return;
+  }
+  const repoName = name.trim();
+  const defaultPrivate = vscode.workspace.getConfiguration("localNest").get<boolean>("github.defaultPrivate", true);
+  const visibility = await vscode.window.showQuickPick(["Private (recommended)", "Public"], { placeHolder: "Who can see " + repoName + " on GitHub?" });
+  if (!visibility) {
+    return;
+  }
+  const isPrivate = visibility.startsWith("Private");
+  if (defaultPrivate !== isPrivate) {
+    await vscode.workspace.getConfiguration("localNest").update("github.defaultPrivate", isPrivate, vscode.ConfigurationTarget.Global);
+  }
+  const go = await vscode.window.showInformationMessage("Create " + repoName + " (" + (isPrivate ? "Private" : "Public") + ") on GitHub as @" + login + " and push this project to it?", { modal: false }, "Create & push", "Cancel");
+  if (go !== "Create & push") {
+    view?.webview.postMessage({ text: "Publish cancelled — nothing was created on GitHub.", type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Creating " + repoName + " on GitHub…", type: "assistant" });
+  const created = await createGitHubRepo(token, { description: "", isPrivate, name: repoName });
+  if (created.error || !created.data) {
+    view?.webview.postMessage({ text: "Publish: " + created.error, type: "assistant" });
+    return;
+  }
+  if (!state.isRepo) {
+    const initErr = await initRepo(root);
+    if (initErr) {
+      view?.webview.postMessage({ text: "Publish: the repository was created at " + created.data.htmlUrl + ", but " + initErr, type: "assistant" });
+      return;
+    }
+  }
+  const setErr = await setRemoteOrigin(root, created.data.cloneUrl);
+  if (setErr) {
+    view?.webview.postMessage({ text: "Publish: the repository was created at " + created.data.htmlUrl + ", but " + setErr + " Set it by hand with: git remote add origin " + created.data.cloneUrl, type: "assistant" });
+    return;
+  }
+  const after = await getRepoState(root);
+  if (after.hasChanges) {
+    const stageErr = await stageAll(root);
+    if (stageErr) {
+      view?.webview.postMessage({ text: "Publish: the repository was created at " + created.data.htmlUrl + ", but " + stageErr, type: "assistant" });
+      return;
+    }
+    const commit = await commitStaged(root, after.hasCommits ? "Publish project to GitHub" : "Initial commit");
+    if (commit.error) {
+      view?.webview.postMessage({ text: "Publish: the repository was created at " + created.data.htmlUrl + ", but " + commit.error, type: "assistant" });
+      return;
+    }
+  }
+  const branch = (await getRepoState(root)).branch || "main";
+  const pushErr = await pushCurrentBranch(root, branch, login, token);
+  if (pushErr) {
+    view?.webview.postMessage({ text: "Publish: the repository was created at " + created.data.htmlUrl + ", but the push failed: " + redactSecrets(pushErr, token) + "\nPush by hand with: git push -u origin " + branch, type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Published ✓ — your project is now on GitHub: " + created.data.htmlUrl + "\nAnyone you share that link with can see it" + (isPrivate ? " (it is Private, so only people you invite)" : "") + ". Push future changes with /push.", type: "assistant" });
+}
+
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
   lastChatRequest = { autoApply, majorFlag, mode, text };
   // Taught Q&A: "Q: ... A: ..." / "Question: ... Answer: ..." — store it
@@ -1386,13 +1745,27 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
       return;
     }
   }
+  // Push confirm (0.9.41): "push it" after /push commits + pushes — handled
+  // before anything else, so it can never be mistaken for a question.
+  if (isPushConfirm(text)) {
+    await confirmPendingPush();
+    return;
+  }
   // Slash skills: "/review ..." etc. Handled before anything else, so a
   // skill never gets mistaken for a normal question, and /skills lists them.
   // Plain-words forms of the two git features (0.9.40): "review staged
   // changes" means /review staged, and "write a commit message" means
   // /commit with no description — the message comes from the git diff.
+  // Plain-words forms of the GitHub features (0.9.41): "connect github"
+  // means /github connect, "push to github" means /push, and "publish to
+  // github" means /publish.
   if (isStagedReviewRequest(text)) { text = "/review staged"; }
   else if (isCommitMessageRequest(text)) { text = "/commit"; }
+  else if (isGitHubConnectRequest(text)) { text = "/github connect"; }
+  else if (isGitHubStatusRequest(text)) { text = "/github status"; }
+  else if (isGitHubDisconnectRequest(text)) { text = "/github disconnect"; }
+  else if (isPublishToGitHubRequest(text)) { text = "/publish"; }
+  else if (isPushToGitHubRequest(text)) { text = "/push"; }
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
   let skillPrompt: string | undefined;
   // Auto-fix diagnostics (0.9.36) and codebase Q&A (0.9.36) state, carried
@@ -1507,6 +1880,26 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
         text = "Review the staged changes in the git diff below.";
         slashHandled = true;
       }
+    }
+    // GitHub in LocalNest (0.9.41): /github connect|status|disconnect,
+    // /push (writes the message from the diff, waits for "push it"), and
+    // /publish (creates the repo on GitHub and pushes the project). These
+    // are actions, not model prompts — handled directly, like /learn.
+    if (name === "github") {
+      const arg = slash[2].trim().toLowerCase();
+      if (arg === "connect" || arg === "") { await connectGitHub(); }
+      else if (arg === "status") { await githubStatusReply(); }
+      else if (arg === "disconnect") { await disconnectGitHub(); }
+      else { view?.webview.postMessage({ text: "GitHub: /github connect — link your account with a token\n/github status — connection + this folder's git state\n/github disconnect — forget the stored token", type: "assistant" }); }
+      return;
+    }
+    if (name === "push") {
+      await startPushFlow();
+      return;
+    }
+    if (name === "publish") {
+      await startPublishFlow();
+      return;
     }
     if (!slashHandled) {
     const skill = allSkills[name];
@@ -2269,6 +2662,10 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         }
       } else if (msg.type === "continueAgent") {
         await continueAgenticLoop();
+      } else if (msg.type === "connectGitHub") {
+        await connectGitHub();
+      } else if (msg.type === "disconnectGitHub") {
+        await disconnectGitHub();
       } else if (msg.type === "setGeminiKey") {
         await vscode.commands.executeCommand("localNest.setGeminiApiKey");
       } else if (msg.type === "runCommand") {
@@ -2459,6 +2856,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "</style></head><body>",
       "<div class='topbar'><span>Chat</span><span class='pill'>Vyntra</span><span class='spacer'></span><button id='refresh' title='Refresh'>↻</button><button id='newChatTop' title='New chat'>+</button></div>",
       "<div style='display:flex;gap:6px;padding:6px 12px 0'><button class='small' id='toggleSessions' style='margin:0'>Past chats ▾</button><button class='small' id='toggleCtx' style='margin:0'>Context used (tokens) ▾</button></div>",
+      "<div id='githubRow' style='display:flex;gap:6px;align-items:center;padding:6px 12px 0;font-size:12px;color:var(--vscode-descriptionForeground)'><span id='githubStatusText'>GitHub: not connected</span><button class='small' id='githubBtn' style='margin:0'>Connect GitHub</button></div>",
       "<div id='topSessions' style='margin:8px 12px;padding:10px;border:1px solid var(--vscode-panel-border);border-radius:10px'><b>Past chats</b><input id='sessionSearch' placeholder='Search past chats…' style='margin-top:6px;padding:6px'><div id='sessionList' style='margin-top:6px;color:var(--vscode-descriptionForeground)'>No past chats yet.</div></div>",
       "<div id='topCtx' style='margin:0 12px 8px'><div style='display:flex;justify-content:space-between;font-size:12px;color:var(--vscode-descriptionForeground)'><span>Context used</span><span id='ctxText'>0 tokens</span></div><div style='height:8px;border-radius:4px;background:var(--vscode-panel-border);overflow:hidden;margin-top:4px'><div id='ctxFill' style='height:100%;width:0%;background:#2dd4bf'></div></div><div id='ctxSummary' style='font-size:12px;color:var(--vscode-descriptionForeground);margin-top:4px'></div></div>",
       "<div class='head'><span class='logo'>🪹</span><div><b>Vyntra</b><br><span style='color:var(--vscode-descriptionForeground)'>Local AI coding agent</span></div></div>",
@@ -2512,12 +2910,14 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('refresh').addEventListener('click', function(){ vscode.postMessage({type:'refresh'}); });",
       "document.getElementById('toggleSessions').addEventListener('click', function(){ var b=document.getElementById('topSessions'); var hidden=b.style.display==='none'; b.style.display=hidden?'block':'none'; document.getElementById('toggleSessions').textContent=hidden?'Past chats ▾':'Past chats ▸'; });",
       "document.getElementById('toggleCtx').addEventListener('click', function(){ var b=document.getElementById('topCtx'); var hidden=b.style.display==='none'; b.style.display=hidden?'block':'none'; document.getElementById('toggleCtx').textContent=hidden?'Context used (tokens) ▾':'Context used (tokens) ▸'; });",
+      "document.getElementById('githubBtn').addEventListener('click', function(){ var b=document.getElementById('githubBtn'); vscode.postMessage({type: b.textContent.indexOf('Disconnect')>=0 ? 'disconnectGitHub' : 'connectGitHub'}); });",
       "document.getElementById('approveAll').addEventListener('click', function(){ approvedCount++; document.getElementById('changesCount').textContent=approvedCount; document.getElementById('approveAll').disabled=true; document.getElementById('approveAll').textContent='Approving…'; vscode.postMessage({type:'approveAll'}); });",
       "document.getElementById('reject').addEventListener('click', function(){ document.getElementById('proposal').style.display='none'; vscode.postMessage({type:'rejectProposal'}); });",
       "document.getElementById('runCmds').addEventListener('click', function(){ vscode.postMessage({type:'runCommands'}); });",
       "function renderSessions(sessions){ var list=document.getElementById('sessionList'); var q=(document.getElementById('sessionSearch').value||'').toLowerCase(); list.innerHTML=''; var shown=sessions.filter(function(s){ return !q || s.title.toLowerCase().indexOf(q)>=0; }); if(!shown.length){ list.textContent=sessions.length?'No past chats match that search.':'No past chats yet.'; return; } shown.forEach(function(s){ var row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:4px 0'; var b=document.createElement('button'); b.className='small'; b.style.cssText='flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; b.textContent=s.title+' ('+s.count+')'; b.addEventListener('click', function(){ vscode.postMessage({type:'openSession', id:s.id}); }); row.appendChild(b); var r=document.createElement('button'); r.className='small'; r.textContent='✎'; r.title='Rename this chat'; r.addEventListener('click', function(){ vscode.postMessage({type:'renameSession', id:s.id}); }); row.appendChild(r); var d=document.createElement('button'); d.className='small'; d.textContent='✕'; d.title='Delete this chat'; d.addEventListener('click', function(){ vscode.postMessage({type:'deleteSession', id:s.id}); }); row.appendChild(d); list.appendChild(row); }); }",
       "window.addEventListener('message', function(ev){ var m=ev.data;",
       " if(m.type==='status'){ document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); document.getElementById('readyText').textContent = m.online ? 'Ready' : 'Ollama offline'; var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
+      " else if(m.type==='githubStatus'){ var t=document.getElementById('githubStatusText'); var b=document.getElementById('githubBtn'); if(t){ t.textContent = m.connected ? ('GitHub: connected' + (m.login ? ' as @'+m.login : '')) : 'GitHub: not connected'; } if(b){ b.textContent = m.connected ? 'Disconnect' : 'Connect GitHub'; } }",
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
       " else if(m.type==='assistant'){ if(currentBubble && (currentBubble.textContent==='Thinking…' || currentBubble.textContent==='')){ currentBubble.remove(); } currentBubble=null; addMsg(m.text,'ai'); }",
       " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",
