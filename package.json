@@ -39,7 +39,11 @@
     "onCommand:localNest.pushToGitHub",
     "onCommand:localNest.publishToGitHub",
     "onStartupFinished",
-    "onChatParticipant:localNest"
+    "onChatParticipant:localNest",
+    "onCommand:localNest.prFromDiff",
+    "onCommand:localNest.renameSymbol",
+    "onCommand:localNest.releaseNotes",
+    "onCommand:localNest.describeImage"
   ],
   "categories": [
     "AI",
@@ -167,6 +171,22 @@
       {
         "command": "localNest.publishToGitHub",
         "title": "Vyntra: Publish Project to GitHub"
+      },
+      {
+        "command": "localNest.prFromDiff",
+        "title": "Vyntra: Write PR Description from Git Diff"
+      },
+      {
+        "command": "localNest.renameSymbol",
+        "title": "Vyntra: Rename Symbol Across Project"
+      },
+      {
+        "command": "localNest.releaseNotes",
+        "title": "Vyntra: Write Release Notes from Commits"
+      },
+      {
+        "command": "localNest.describeImage",
+        "title": "Vyntra: Read a Screenshot with a Vision Model"
       },
       {
         "command": "localNest.connectRemote",
@@ -386,8 +406,13 @@
         },
         "localNest.github.defaultPrivate": {
           "default": true,
-          "description": "When /publish creates a GitHub repository, make it Private by default. The publish flow still asks Private/Public each time — this only sets which option is pre-selected.",
+          "description": "When /publish creates a GitHub repository, make it Private by default. The publish flow still asks Private/Public each time \u2014 this only sets which option is pre-selected.",
           "type": "boolean"
+        },
+        "localNest.vision.defaultModel": {
+          "default": "moondream",
+          "description": "Vision model used to read screenshots (/vision, or the Attach image button) when the current chat model cannot see images. moondream is small and fast on CPU; llava:7b is the bigger alternative. Only used when no installed vision model is found.",
+          "type": "string"
         }
       },
       "title": "Vyntra"
@@ -474,7 +499,7 @@
     "vscode:prepublish": "npm run compile",
     "watch": "tsc -watch -p ./"
   },
-  "version": "0.9.41",
+  "version": "0.9.42",
   "homepage": "https://localnest.nitinkumar.me",
   "repository": {
     "type": "git",

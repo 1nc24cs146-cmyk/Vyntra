@@ -13,7 +13,9 @@ import { buildLanguageProject, detectLanguage, fullLanguageGuidance, platformInf
 import { buildAutoFixPrompt, countBySeverity, DiagnosticItem, fixHintFor, formatDiagnostics } from "./diagnostics";
 import { buildCodebaseAnswer, buildCodebaseQAPrompt, extractQuestionTerms, findDefinitions, isCodebaseQuestion } from "./codebaseQA";
 import { registerInlineCompletion } from "./inlineCompletionProvider";
-import { formatGitDiffForPrompt, getGitDiff, GitDiffResult, isCommitMessageRequest, isStagedReviewRequest, parseDiffFiles } from "./git";
+import { commitType, formatCommitsForPrompt, formatGitDiffForPrompt, getGitDiff, getGitLog, GitDiffResult, groupCommitsForRelease, isCommitMessageRequest, isPrRequest, isReleaseNotesRequest, isStagedReviewRequest, parseDiffFiles, suggestedBump } from "./git";
+import { findSymbolOccurrences, findWholeSymbolOffsets, isWholeSymbol, isRenameConfirm, isRenameRequest, isValidSymbol, MAX_RENAME_FILES, MAX_RENAME_OCCURRENCES, parseRenameRequest } from "./rename";
+import { DEFAULT_VISION_MODEL, describeImage, IMAGE_EXTENSIONS, isVisionModel, isVisionRequest, MAX_IMAGE_BYTES, mimeFromExtension, pickVisionModel } from "./vision";
 import { buildCredentialHelper, checkGitHubRepo, commitStaged, createGitHubRepo, formatRepoState, getGitHubUser, getRepoState, GITHUB_TOKEN_KEY, GITHUB_TOKEN_URL, initRepo, isGitHubConnectRequest, isGitHubDisconnectRequest, isGitHubStatusRequest, isPublishToGitHubRequest, isPushConfirm, isPushToGitHubRequest, parseGitHubRemote, pushCurrentBranch, redactSecrets, sanitizeRepoName, setRemoteOrigin, stageAll } from "./github";
 
 type Mode = "ask" | "plan" | "agent" | "build";
@@ -687,6 +689,45 @@ export function activate(context: vscode.ExtensionContext) {
       await vscode.commands.executeCommand("localNest.chat.focus");
       setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/publish", type: "prefill" }); }, 400);
     }),
+    vscode.commands.registerCommand("localNest.prFromDiff", async () => {
+      // PR description from the git diff (0.9.42): reads the staged diff
+      // (unstaged when nothing is staged) and writes the description.
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showWarningMessage("Vyntra: open a project folder first — I read the diff from the open folder."); return; }
+      const diff = await getGitDiff(root, "auto");
+      if (diff.error) { vscode.window.showInformationMessage("Vyntra: " + diff.error); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/pr", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.renameSymbol", async () => {
+      // Workspace-wide rename (0.9.42): ask the two names, then prefill
+      // /rename in chat — the list is shown there and nothing changes
+      // until the user replies "yes, rename".
+      const from = await vscode.window.showInputBox({ placeHolder: "e.g. getUser", prompt: "Rename which name (function, variable, class)?", validateInput: (v) => v.trim().length >= 2 && !/\s/.test(v.trim()) ? undefined : "At least 2 characters, no spaces." });
+      if (!from || !from.trim()) { return; }
+      const to = await vscode.window.showInputBox({ placeHolder: "e.g. fetchUser", prompt: "Rename `" + from.trim() + "` to what?", validateInput: (v) => v.trim().length >= 2 && !/\s/.test(v.trim()) ? undefined : "At least 2 characters, no spaces." });
+      if (!to || !to.trim()) { return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/rename " + from.trim() + " " + to.trim(), type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.releaseNotes", async () => {
+      // Release notes from commits (0.9.42): prefill /release in chat.
+      const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      if (!root) { vscode.window.showWarningMessage("Vyntra: open a project folder first — I read the commits from the open folder."); return; }
+      const log = await getGitLog(root);
+      if (log.error) { vscode.window.showInformationMessage("Vyntra: " + log.error); return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/release", type: "prefill" }); }, 400);
+    }),
+    vscode.commands.registerCommand("localNest.describeImage", async () => {
+      // Read a screenshot (0.9.42): pick the image, then prefill /vision
+      // in chat — the question is asked there, with the default question
+      // when the user sends it as-is.
+      const picked = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { Images: ["png", "jpg", "jpeg", "webp", "gif"] }, title: "Pick a screenshot for LocalNest to read" });
+      if (!picked || !picked.length) { return; }
+      await vscode.commands.executeCommand("localNest.chat.focus");
+      setTimeout(() => { view?.webview.postMessage({ mode: "ask", text: "/vision " + picked[0].fsPath, type: "prefill" }); }, 400);
+    }),
     vscode.commands.registerCommand("localNest.connectRemote", async () => {
       const url = await vscode.window.showInputBox({ placeHolder: "http://192.168.1.10:11434", prompt: "Remote Ollama host URL (your own host; code is sent only there)" });
       if (!url || !/^https?:\/\//.test(url.trim())) { vscode.window.showWarningMessage("Vyntra: that is not an http(s) URL."); return; }
@@ -764,6 +805,7 @@ interface Config {
   routingChatModel: string;
   routingEditModel: string;
   temperature: number;
+  visionDefaultModel: string;
 }
 
 function getConfig(): Config {
@@ -797,7 +839,8 @@ function getConfig(): Config {
     routingAgentModel: cfg.get<string>("routing.agentModel", ""),
     routingChatModel: cfg.get<string>("routing.chatModel", ""),
     routingEditModel: cfg.get<string>("routing.editModel", ""),
-    temperature: cfg.get<number>("temperature", 0.2)
+    temperature: cfg.get<number>("temperature", 0.2),
+    visionDefaultModel: cfg.get<string>("vision.defaultModel", DEFAULT_VISION_MODEL)
   };
 }
 function openAiUrls(cfg: Config): string[] {
@@ -851,6 +894,16 @@ function selfTestText(): string {
   checks.push("isPushConfirm 'push it' -> " + (isPushConfirm("push it") && isPushConfirm("yes, push") && !isPushConfirm("push it to production") ? "PASS" : "FAIL"));
   checks.push("buildCredentialHelper answers from env, never argv -> " + (buildCredentialHelper().includes("LN_GH_TOKEN") && buildCredentialHelper().startsWith("!f()") ? "PASS" : "FAIL"));
   checks.push("redactSecrets strips the token -> " + (redactSecrets("failed for ghp_abc123 here", "ghp_abc123") === "failed for [token] here" ? "PASS" : "FAIL"));
+  // PR descriptions, rename, release notes, vision (0.9.42)
+  checks.push("isPrRequest / isReleaseNotesRequest -> " + (isPrRequest("write a pr description") && isPrRequest("write a pull request description for this branch") && !isPrRequest("write a commit message") && isReleaseNotesRequest("write the release notes") && !isReleaseNotesRequest("write a pr description") ? "PASS" : "FAIL"));
+  const relCommits = [{ body: "", hash: "a1", subject: "feat: add /pr from the diff" }, { body: "", hash: "b2", subject: "fix: handle empty staged diff" }, { body: "", hash: "c3", subject: "docs: update readme" }, { body: "", hash: "d4", subject: "random commit" }];
+  const relGroups = groupCommitsForRelease(relCommits);
+  checks.push("groupCommitsForRelease feat/fix/docs/other -> " + (relGroups.length === 4 && relGroups[0].heading === "Added" && relGroups[1].heading === "Fixed" && suggestedBump(relCommits) === "minor" && suggestedBump(relCommits.slice(1)) === "patch" && commitType("chore(deps): bump x") === "chore" ? "PASS" : "FAIL"));
+  checks.push("parseRenameRequest /rename + words -> " + (parseRenameRequest("/rename getUser fetchUser")?.to === "fetchUser" && parseRenameRequest("rename foo to bar")?.from === "foo" && parseRenameRequest("rename the file") === null ? "PASS" : "FAIL"));
+  checks.push("isWholeSymbol foo in fooBar/foo()/ foo  -> " + (!isWholeSymbol("fooBar()", 0, "foo") && isWholeSymbol("foo()", 0, "foo") && isWholeSymbol("  foo  ", 2, "foo") && findWholeSymbolOffsets("foo fooBar foo", "foo").length === 2 ? "PASS" : "FAIL"));
+  checks.push("isRenameConfirm 'yes, rename' / 'apply it' -> " + (isRenameConfirm("yes, rename") && isRenameConfirm("apply it") && isRenameConfirm("rename it") && !isRenameConfirm("rename foo to bar") ? "PASS" : "FAIL"));
+  checks.push("pickVisionModel prefers current, then installed -> " + (pickVisionModel(["qwen2.5-coder:7b", "llava:7b"], "llava:7b") === "llava:7b" && pickVisionModel(["qwen2.5-coder:7b", "moondream"], "qwen2.5-coder:7b") === "moondream" && pickVisionModel(["qwen2.5-coder:7b"], "qwen2.5-coder:7b") === null && isVisionModel("llama3.2-vision:11b") && !isVisionModel("qwen2.5-coder:7b") ? "PASS" : "FAIL"));
+  checks.push("isVisionRequest 'read this screenshot' -> " + (isVisionRequest("read this screenshot") && isVisionRequest("what's on this screen") && !isVisionRequest("read this file") ? "PASS" : "FAIL"));
   return checks.join("\n");
 }
 async function tryAutoStartOllama(host: string): Promise<void> {
@@ -1242,6 +1295,10 @@ const SKILLS: Record<string, Skill> = {
   github: { description: "GitHub account: /github connect to link your account, /github status to see the connection + this folder, /github disconnect to forget the token", prompt: "" },
   push: { description: "Push to GitHub: writes the commit message from your changes, then waits for you to reply 'push it' — nothing is committed or pushed without that", prompt: "Write a COMMIT MESSAGE for the change described: a short conventional-commit title (feat/fix/docs/refactor/test/chore), then a 2-4 line body saying what changed and why. When a git diff is given, base the message ONLY on that diff — the scope comes from the files changed, the type from what the diff does — and never invent a change that is not in it." },
   publish: { description: "Publish this project to GitHub: creates the repository on your account and pushes the project to it — asks the name and Private/Public first", prompt: "" },
+  pr: { description: "PR description from the git diff: title, summary, what changed, why, and how to test — /pr on its own (staged first, then unstaged), /pr staged or /pr all", prompt: "Write a PULL REQUEST DESCRIPTION for the git diff given, in this shape:\n# Title (one short line, what the change does)\n\nSummary (2-3 lines: what this PR does and why it matters)\n\nWhat changed (bulleted, grouped by area or file — name the files)\n\nWhy (the reason for the change, from the diff)\n\nHow to test (concrete steps: commands to run, what to check)\nBase it ONLY on the diff — never invent a change that is not in it. If the diff is trivial, say so and keep it short." },
+  rename: { description: "Rename a symbol across the whole project: /rename oldName newName — shows every place first, changes nothing until you reply 'yes, rename'", prompt: "" },
+  release: { description: "Release notes from your commits: /release groups the commits since the last tag (or the last 20 when there is no tag) and writes the notes, with the next version suggested", prompt: "Write RELEASE NOTES from the commits given, in this shape:\n## What's new in vX.Y.Z (suggest the version from the bump hint — minor when a feature landed, patch for fixes only)\n\nAdded (one plain line per feature)\nFixed (one plain line per fix)\nChanged / Docs / Tests (only the groups that have items)\nOne line per change, in plain words, no jargon. Never invent a change that is not in the commits given. If a commit message is vague, say what it did from the files it touched, or leave it out and say so." },
+  vision: { description: "Read a screenshot: tap 📎 next to Send to attach one, then ask what it shows — or /vision <path to the image>. Needs a vision model in Ollama (moondream is small and fast)", prompt: "" },
 };
 function skillsHelpText(): string {
   return "Built-in skills — type one at the start of your message:\n" + Object.entries(SKILLS).map(([n, s]) => "/" + n + " — " + s.description).join("\n") + "\n\nExample: /review look at this function and tell me what is wrong\nType /skills any time to see this list again.";
@@ -1404,8 +1461,9 @@ function collectEditorDiagnostics(scope: "file" | "workspace"): DiagnosticItem[]
 // Connect a GitHub account with a personal access token, push changes, and
 // publish a project — all from the chat panel. The token lives ONLY in the
 // editor's Secret Storage, never in settings, files, or chat history, and
-// git push authenticates through GIT_ASKPASS (see src/github.ts), so the
-// token never appears in a command line or a remote URL. Nothing is
+// git push authenticates through a per-command credential helper (see
+// src/github.ts), so the token never appears in a command line or a remote
+// URL. Nothing is
 // committed, pushed, or published without the user confirming in the chat
 // first: /push waits for a "push it" reply, /publish asks the repo name +
 // Private/Public and then a final confirm.
@@ -1414,6 +1472,12 @@ let githubLoginCache: string | null = null;
 // the diff (or typed by the user when Ollama is offline). Expires after
 // 10 minutes so a stale "push it" can never fire later by accident.
 let pendingPush: { branch: string; cwd: string; message: string; remote: string; when: number } | null = null;
+// Workspace-wide rename (0.9.42): the occurrences found by /rename, waiting
+// for a "yes, rename" reply — nothing is changed until the user confirms.
+let pendingRename: { edits: { range: vscode.Range; uri: vscode.Uri }[]; files: string[]; from: string; to: string; when: number } | null = null;
+// Vision (0.9.42): the screenshot attached from the panel (📎), held in
+// memory for the next question only, then dropped.
+let pendingVisionImage: { base64: string; name: string } | null = null;
 
 async function getGitHubToken(): Promise<string | undefined> {
   try {
@@ -1724,6 +1788,166 @@ async function startPublishFlow(): Promise<void> {
   view?.webview.postMessage({ text: "Published ✓ — your project is now on GitHub: " + created.data.htmlUrl + "\nAnyone you share that link with can see it" + (isPrivate ? " (it is Private, so only people you invite)" : "") + ". Push future changes with /push.", type: "assistant" });
 }
 
+// --- PR descriptions, workspace rename, release notes, vision (0.9.42) ---
+
+async function startRenameFlow(from: string, to: string): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {
+    view?.webview.postMessage({ text: "Rename: open a project folder first — I search the open folder for every use of the name.", type: "assistant" });
+    return;
+  }
+  if (!isValidSymbol(from) || !isValidSymbol(to)) {
+    view?.webview.postMessage({ text: "Rename: both names need at least 2 characters and no spaces — usage: /rename oldName newName", type: "assistant" });
+    return;
+  }
+  if (from === to) {
+    view?.webview.postMessage({ text: "Rename: the two names are the same (" + from + ") — nothing to change.", type: "assistant" });
+    return;
+  }
+  // The search reads the files directly (no rg, no git grep), so it works
+  // in any folder, not just a git repo. Whole-symbol matches only: "foo"
+  // inside "fooBar" is not a rename target. node_modules, .git and build
+  // output are never searched.
+  const search = await findSymbolOccurrences(root, from);
+  const edits = search.occurrences.map((o) => ({
+    range: new vscode.Range(o.line, o.character, o.line, o.character + from.length),
+    uri: vscode.Uri.file(root + "/" + o.file)
+  }));
+  if (!edits.length) {
+    view?.webview.postMessage({ text: "Rename: no whole-symbol use of `" + from + "` found in this project (" + search.filesScanned + " file(s) searched) — check the spelling, or open the folder the name lives in.", type: "assistant" });
+    return;
+  }
+  if (search.tooMany) {
+    view?.webview.postMessage({ text: "Rename: `" + from + "` appears in more than " + MAX_RENAME_OCCURRENCES + " places — too broad to rename safely in one go. Narrow it down (a longer, more specific name), or rename it file by file instead.", type: "assistant" });
+    return;
+  }
+  const byFile = new Map<string, { count: number; lines: string[] }>();
+  for (const o of search.occurrences) {
+    const entry = byFile.get(o.file) || { count: 0, lines: [] };
+    entry.count++;
+    if (entry.lines.length < 3) {
+      entry.lines.push("  " + o.file + ":" + (o.line + 1) + " — " + o.lineText.trim().slice(0, 120));
+    }
+    byFile.set(o.file, entry);
+  }
+  const files = [...byFile.keys()];
+  const shown = [...byFile.values()].flatMap((v) => v.lines).slice(0, 20);
+  pendingRename = { edits, files, from, to, when: Date.now() };
+  view?.webview.postMessage({ text: "Rename `" + from + "` → `" + to + "`: " + edits.length + " place(s) in " + files.length + " file(s)" + (search.capped ? " (search stopped at " + MAX_RENAME_FILES + " files — very large projects may have more)" : "") + ":\n" + files.map((f) => "- " + f + " (" + byFile.get(f)!.count + ")").join("\n") + (shown.length ? "\n\nFirst matches:\n" + shown.join("\n") : "") + (edits.length > shown.length ? "\n… and " + (edits.length - shown.length) + " more" : "") + "\n\nReply `yes, rename` and I will change them all — nothing is changed until you say so. (Waiting renames expire after 10 minutes.)", type: "assistant" });
+}
+
+async function confirmPendingRename(): Promise<void> {
+  if (!pendingRename || Date.now() - pendingRename.when > 10 * 60 * 1000) {
+    pendingRename = null;
+    view?.webview.postMessage({ text: "Nothing is waiting to be renamed — run /rename oldName newName first, then reply `yes, rename` when the list looks right.", type: "assistant" });
+    return;
+  }
+  const p = pendingRename;
+  pendingRename = null;
+  const edit = new vscode.WorkspaceEdit();
+  for (const e of p.edits) {
+    edit.replace(e.uri, e.range, p.to);
+  }
+  const ok = await vscode.workspace.applyEdit(edit);
+  if (!ok) {
+    view?.webview.postMessage({ text: "Rename: the edit could not be applied — a file may have changed since the search. Run /rename again to re-check the list.", type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Renamed ✓ — `" + p.from + "` → `" + p.to + "` in " + p.edits.length + " place(s) across " + p.files.length + " file(s). The files are changed in the editor — press Ctrl+S (Cmd+S on Mac) to save them.", type: "assistant" });
+}
+
+async function startReleaseNotes(): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!root) {
+    view?.webview.postMessage({ text: "Release notes: open a project folder first — I read the commits from the open folder.", type: "assistant" });
+    return;
+  }
+  const log = await getGitLog(root);
+  if (log.error) {
+    view?.webview.postMessage({ text: "Release notes: " + log.error, type: "assistant" });
+    return;
+  }
+  const cfg = getConfig();
+  const grouped = formatCommitsForPrompt(log);
+  if (!await providerOnline(cfg)) {
+    view?.webview.postMessage({ text: "Ollama is offline, so here are the commits grouped for the release notes — start Ollama and run /release again for polished notes:\n\n" + grouped + "\n\nSuggested next version: " + (suggestedBump(log.commits) === "minor" ? "minor bump (a feature landed)" : "patch bump (fixes only)"), type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Writing release notes from " + log.rangeLabel + "…", type: "assistant" });
+  const notes = (await chatOnce(cfg, [
+    { content: systemPrompt("ask", SKILLS.release.prompt), role: "system" },
+    { content: "Write release notes from these commits.\n\n" + grouped + "\n\nSuggested version bump: " + suggestedBump(log.commits) + ".", role: "user" }
+  ])).trim();
+  if (!notes) {
+    view?.webview.postMessage({ text: "Release notes: the model returned an empty reply. The commits are grouped here instead:\n\n" + grouped, type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: notes, type: "assistant" });
+}
+
+async function startVisionFlow(question: string, imagePath?: string): Promise<void> {
+  const cfg = getConfig();
+  if (!await providerOnline(cfg)) {
+    view?.webview.postMessage({ text: "Vision: Ollama is offline at " + cfg.host + " — start it first (ollama serve), then attach the screenshot again and ask.", type: "assistant" });
+    return;
+  }
+  let base64 = "";
+  let name = "";
+  if (imagePath) {
+    const trimmed = imagePath.trim();
+    const ext = trimmed.includes(".") ? trimmed.slice(trimmed.lastIndexOf(".") + 1).toLowerCase() : "";
+    if (!IMAGE_EXTENSIONS.includes(ext)) {
+      view?.webview.postMessage({ text: "Vision: that does not look like an image file — use a .png, .jpg, .webp or .gif file (usage: /vision <path to the image> <your question>).", type: "assistant" });
+      return;
+    }
+    const uri = /^[A-Za-z]:[\\/]|^\//.test(trimmed)
+      ? vscode.Uri.file(trimmed)
+      : vscode.Uri.file((vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || "") + "/" + trimmed);
+    let bytes: Uint8Array;
+    try {
+      bytes = await vscode.workspace.fs.readFile(uri);
+    } catch {
+      view?.webview.postMessage({ text: "Vision: could not read that image file (" + trimmed + ") — check the path, or tap 📎 next to Send to pick it instead.", type: "assistant" });
+      return;
+    }
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      view?.webview.postMessage({ text: "Vision: that image is too big (" + (bytes.length / 1024 / 1024).toFixed(1) + " MB — the limit is 10 MB). Crop it or take a smaller screenshot first.", type: "assistant" });
+      return;
+    }
+    base64 = Buffer.from(bytes).toString("base64");
+    name = trimmed.split(/[\\/]/).pop() || "image";
+  } else if (pendingVisionImage) {
+    base64 = pendingVisionImage.base64;
+    name = pendingVisionImage.name;
+  } else {
+    view?.webview.postMessage({ text: "Vision: attach a screenshot first — tap 📎 next to Send, then ask what it shows. Or type /vision <path to the image file> and the question.", type: "assistant" });
+    return;
+  }
+  let models: string[] = [];
+  try {
+    models = await listModels(cfg.host);
+  } catch {
+    models = [];
+  }
+  const current = modelForMode(cfg, "ask");
+  const visionModel = pickVisionModel(models, current);
+  if (!visionModel) {
+    const suggest = cfg.visionDefaultModel || DEFAULT_VISION_MODEL;
+    view?.webview.postMessage({ text: "Vision: no vision model is installed in Ollama — a code model cannot see images. Pull the small one (fast on CPU) with: ollama pull " + suggest + "\nThen attach the screenshot again and ask. (llava:7b also works, if you want the bigger one.)", type: "assistant" });
+    return;
+  }
+  view?.webview.postMessage({ text: "Reading " + name + " with " + visionModel + "… (vision is slow on CPU — this can take a minute.)", type: "assistant" });
+  const result = await describeImage(cfg.host, visionModel, base64, question && question.trim() ? question.trim() : "Read this screenshot: what error or message does it show, and what is the fix?");
+  if (result.error) {
+    view?.webview.postMessage({ text: "Vision: " + result.error, type: "assistant" });
+    return;
+  }
+  pendingVisionImage = null;
+  view?.webview.postMessage({ type: "imageCleared" });
+  view?.webview.postMessage({ text: result.answer, type: "assistant" });
+}
+
+
 async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFlag: boolean, modelOverride?: string) {
   lastChatRequest = { autoApply, majorFlag, mode, text };
   // Taught Q&A: "Q: ... A: ..." / "Question: ... Answer: ..." — store it
@@ -1751,6 +1975,12 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     await confirmPendingPush();
     return;
   }
+  // Rename confirm (0.9.42): "yes, rename" after /rename — only when a
+  // rename is actually waiting, so it can never fire by accident.
+  if (pendingRename && isRenameConfirm(text)) {
+    await confirmPendingRename();
+    return;
+  }
   // Slash skills: "/review ..." etc. Handled before anything else, so a
   // skill never gets mistaken for a normal question, and /skills lists them.
   // Plain-words forms of the two git features (0.9.40): "review staged
@@ -1761,12 +1991,24 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
   // github" means /publish.
   if (isStagedReviewRequest(text)) { text = "/review staged"; }
   else if (isCommitMessageRequest(text)) { text = "/commit"; }
+  else if (isPrRequest(text)) { text = "/pr"; }
+  else if (isReleaseNotesRequest(text)) { text = "/release"; }
   else if (isGitHubConnectRequest(text)) { text = "/github connect"; }
   else if (isGitHubStatusRequest(text)) { text = "/github status"; }
   else if (isGitHubDisconnectRequest(text)) { text = "/github disconnect"; }
   else if (isPublishToGitHubRequest(text)) { text = "/publish"; }
   else if (isPushToGitHubRequest(text)) { text = "/push"; }
+  else if (isRenameRequest(text)) { const r = parseRenameRequest(text)!; text = "/rename " + r.from + " " + r.to; }
+  else if (isVisionRequest(text)) { text = "/vision"; }
   const slash = text.trim().match(/^\/(\w+)\s*(.*)$/s);
+  // Vision (0.9.42): a screenshot attached from the panel (📎) rides with
+  // the next plain question — "what's this error?" — and is read by a
+  // vision model. A slash command with an image attached means the user
+  // changed their mind; the image stays attached for the next question.
+  if (!slash && pendingVisionImage) {
+    await startVisionFlow(text);
+    return;
+  }
   let skillPrompt: string | undefined;
   // Auto-fix diagnostics (0.9.36) and codebase Q&A (0.9.36) state, carried
   // from the slash handling below into the model call further down.
@@ -1899,6 +2141,64 @@ async function handleChat(mode: Mode, text: string, autoApply: boolean, majorFla
     }
     if (name === "publish") {
       await startPublishFlow();
+      return;
+    }
+    // PR description from the git diff (0.9.42): "/pr" with no description
+    // reads the diff — staged first, unstaged when nothing is staged — and
+    // writes title, summary, what changed, why, and how to test from it.
+    // "/pr staged" forces the staged diff; "/pr all" uses everything vs
+    // HEAD. A description still works the old way (falls through to the
+    // generic handler below, with the pr skill prompt).
+    if (name === "pr") {
+      const arg = slash[2].trim();
+      if (!arg || /^(staged|unstaged|all|diff|working)$/i.test(arg)) {
+        const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        if (!root) {
+          view?.webview.postMessage({ text: "PR description from diff: open a project folder first — I read the diff from the open folder. Or describe the change and I will write the description from that instead.", type: "assistant" });
+          return;
+        }
+        const scope = /staged/i.test(arg) ? "staged" as const : /unstaged|working/i.test(arg) ? "unstaged" as const : /all/i.test(arg) ? "all" as const : "auto" as const;
+        gitDiff = await getGitDiff(root, scope);
+        if (gitDiff.error) {
+          view?.webview.postMessage({ text: "PR description from diff: " + gitDiff.error, type: "assistant" });
+          return;
+        }
+        view?.webview.postMessage({ text: "PR description from the " + gitDiff.scopeLabel + " — " + gitDiff.files.length + " file(s): " + gitDiff.files.join(", ") + ". Writing the title, summary, changes, why, and how to test from the diff itself.", type: "assistant" });
+        skillPrompt = SKILLS.pr.prompt;
+        text = "Write a pull request description for the git diff below.";
+        slashHandled = true;
+      }
+    }
+    // Workspace-wide rename (0.9.42): "/rename oldName newName" searches
+    // the whole project, shows every place, and waits for "yes, rename".
+    if (name === "rename") {
+      const parsed = parseRenameRequest(text);
+      if (!parsed) {
+        view?.webview.postMessage({ text: "Usage: /rename oldName newName\nExample: /rename getUser fetchUser\nI search the whole project for the old name, show every place it appears (file + line), and change nothing until you reply `yes, rename`.", type: "assistant" });
+        return;
+      }
+      await startRenameFlow(parsed.from, parsed.to);
+      return;
+    }
+    // Release notes from commits (0.9.42): "/release" groups the commits
+    // since the last tag (or the last 20 when there is no tag).
+    if (name === "release") {
+      await startReleaseNotes();
+      return;
+    }
+    // Read a screenshot (0.9.42): "/vision <path> <question>" reads the
+    // image file with a vision model; "/vision" on its own uses the
+    // screenshot attached from the panel (📎).
+    if (name === "vision") {
+      const arg = slash[2].trim();
+      const first = arg.split(/\s+/)[0] || "";
+      const looksLikePath = /\.(png|jpe?g|webp|gif)$/i.test(first) || first.includes("/") || first.includes("\\");
+      if (looksLikePath) {
+        const question = arg.slice(first.length).trim();
+        await startVisionFlow(question, first.replace(/^["']|["']$/g, ""));
+      } else {
+        await startVisionFlow(arg);
+      }
       return;
     }
     if (!slashHandled) {
@@ -2666,6 +2966,28 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
         await connectGitHub();
       } else if (msg.type === "disconnectGitHub") {
         await disconnectGitHub();
+      } else if (msg.type === "attachImage") {
+        // Vision (0.9.42): pick a screenshot — held in memory for the next
+        // question only, never written to disk or sent anywhere but the
+        // user's own Ollama host.
+        const picked = await vscode.window.showOpenDialog({ canSelectFiles: true, canSelectFolders: false, canSelectMany: false, filters: { Images: ["png", "jpg", "jpeg", "webp", "gif"] }, title: "Pick a screenshot for LocalNest to read" });
+        if (picked && picked.length) {
+          const uri = picked[0];
+          try {
+            const bytes = await vscode.workspace.fs.readFile(uri);
+            if (bytes.length > MAX_IMAGE_BYTES) {
+              view?.webview.postMessage({ text: "That image is too big (" + (bytes.length / 1024 / 1024).toFixed(1) + " MB — the limit is 10 MB). Take a smaller screenshot or crop it first.", type: "assistant" });
+            } else {
+              pendingVisionImage = { base64: Buffer.from(bytes).toString("base64"), name: uri.path.split(/[\\/]/).pop() || "image" };
+              view?.webview.postMessage({ name: pendingVisionImage.name, type: "imageAttached" });
+            }
+          } catch {
+            view?.webview.postMessage({ text: "Could not read that image file — try picking it again.", type: "assistant" });
+          }
+        }
+      } else if (msg.type === "clearImage") {
+        pendingVisionImage = null;
+        view?.webview.postMessage({ type: "imageCleared" });
       } else if (msg.type === "setGeminiKey") {
         await vscode.commands.executeCommand("localNest.setGeminiApiKey");
       } else if (msg.type === "runCommand") {
@@ -2880,7 +3202,7 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "</div>",
       "<div class='foot'><span>⎇ Changes <span id='changesCount'>0</span> &nbsp; &gt;_ Terminal <span id='terminalCount'>0</span></span><span id='readyText'>Ready</span></div>",
       "<div class='chips'><button data-chip='@file'>@file</button><button data-chip='@selection'>@selection</button><button data-chip='@terminal'>@terminal</button><button data-chip='@diagnostics'>@diagnostics</button><button data-chip='@git'>@git</button></div>",
-      "<div class='composer'><textarea id='input' placeholder='Type a task, question, or / for commands…'></textarea><div class='sendrow'><button id='send'>Send</button></div></div>",
+      "<div class='composer'><div id='imageChip' style='display:none;margin-bottom:6px;font-size:12px;color:var(--vscode-descriptionForeground);cursor:pointer' title='Tap to remove this image'></div><textarea id='input' placeholder='Type a task, question, or / for commands…'></textarea><div class='sendrow'><button id='attachImage' title='Attach a screenshot — your next question will be asked about it' style='background:var(--vscode-button-secondaryBackground);color:var(--vscode-foreground);margin-right:6px'>📎 Attach image</button><button id='send'>Send</button></div></div>",
       "<div style='display:none'><select id='target'><option value='workspace'>This project folder</option></select><input id='customPath'><input type='checkbox' id='fullAccess'><input type='checkbox' id='autoApply'><input type='checkbox' id='majorProject'><input type='checkbox' id='agenticLoop' checked><input type='checkbox' id='lowBandwidth'><input id='temperature' type='number' value='0.2'></div>",
       "<script>",
       "var vscode = acquireVsCodeApi(); var mode = 'ask'; var currentBubble = null; var lastPlan = ''; var approvedCount = 0;",
@@ -2904,6 +3226,8 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('model').addEventListener('change', function(e){ vscode.postMessage({type:'setModel', model:e.target.value}); });",
       "document.getElementById('temperature').addEventListener('change', function(e){ vscode.postMessage({type:'temperature', value:e.target.value}); });",
       "document.getElementById('send').addEventListener('click', send);",
+      "document.getElementById('attachImage').addEventListener('click', function(){ vscode.postMessage({type:'attachImage'}); });",
+      "document.getElementById('imageChip').addEventListener('click', function(){ vscode.postMessage({type:'clearImage'}); });",
       "document.getElementById('buildPlan').addEventListener('click', function(){ if(!lastPlan) return; addMsg('Build this plan','user'); currentBubble = addMsg('Thinking…','ai'); var ti=targetInfo(); mode='agent'; document.querySelectorAll('.modes button').forEach(function(x){ x.classList.toggle('on', x.getAttribute('data-mode')==='agent'); }); vscode.postMessage({type:'chat', mode:'agent', text:'Build this plan exactly:\\n'+lastPlan, autoApply: document.getElementById('autoApply').checked, major: document.getElementById('majorProject').checked, agenticLoop: document.getElementById('agenticLoop').checked, lowBandwidth: document.getElementById('lowBandwidth').checked, provider: 'ollama', target: ti.target, customPath: ti.customPath, fullAccess: ti.fullAccess}); document.getElementById('buildPlan').style.display='none'; });",
       "document.getElementById('input').addEventListener('keydown', function(e){ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); } });",
       "document.querySelectorAll('.modes button[data-mode]').forEach(function(b){ b.addEventListener('click', function(){ mode=b.getAttribute('data-mode'); document.querySelectorAll('.modes button[data-mode]').forEach(function(x){ x.classList.toggle('on', x===b); }); }); });",
@@ -2916,8 +3240,10 @@ class VyntraViewProvider implements vscode.WebviewViewProvider {
       "document.getElementById('runCmds').addEventListener('click', function(){ vscode.postMessage({type:'runCommands'}); });",
       "function renderSessions(sessions){ var list=document.getElementById('sessionList'); var q=(document.getElementById('sessionSearch').value||'').toLowerCase(); list.innerHTML=''; var shown=sessions.filter(function(s){ return !q || s.title.toLowerCase().indexOf(q)>=0; }); if(!shown.length){ list.textContent=sessions.length?'No past chats match that search.':'No past chats yet.'; return; } shown.forEach(function(s){ var row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:4px 0'; var b=document.createElement('button'); b.className='small'; b.style.cssText='flex:1;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; b.textContent=s.title+' ('+s.count+')'; b.addEventListener('click', function(){ vscode.postMessage({type:'openSession', id:s.id}); }); row.appendChild(b); var r=document.createElement('button'); r.className='small'; r.textContent='✎'; r.title='Rename this chat'; r.addEventListener('click', function(){ vscode.postMessage({type:'renameSession', id:s.id}); }); row.appendChild(r); var d=document.createElement('button'); d.className='small'; d.textContent='✕'; d.title='Delete this chat'; d.addEventListener('click', function(){ vscode.postMessage({type:'deleteSession', id:s.id}); }); row.appendChild(d); list.appendChild(row); }); }",
       "window.addEventListener('message', function(ev){ var m=ev.data;",
-      " if(m.type==='status'){ document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); document.getElementById('readyText').textContent = m.online ? 'Ready' : 'Ollama offline'; var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
+      " if(m.type==='status'){ document.getElementById('host').textContent = m.host + (m.online ? ' — ' + m.models.length + ' model(s)' : ' — start Ollama to go live'); document.getElementById('readyText').textContent = m.online ? 'Ready' : 'Ollama offline'; var sel=document.getElementById('model'); var cur=sel.value; var installed=m.models||[]; var popular=['qwen2.5-coder:7b','llama3.2:3b','mistral:7b','phi3:mini','codellama:7b','llama3.1:8b','moondream','llava:7b']; var all=installed.slice(); popular.forEach(function(n){ if(all.indexOf(n)<0) all.push(n); }); sel.innerHTML=''; all.forEach(function(name){ var o=document.createElement('option'); o.value=name; o.textContent=installed.indexOf(name)>=0 ? name : name+' (download)'; if(name===(m.model||cur)) o.selected=true; sel.appendChild(o); }); }",
       " else if(m.type==='githubStatus'){ var t=document.getElementById('githubStatusText'); var b=document.getElementById('githubBtn'); if(t){ t.textContent = m.connected ? ('GitHub: connected' + (m.login ? ' as @'+m.login : '')) : 'GitHub: not connected'; } if(b){ b.textContent = m.connected ? 'Disconnect' : 'Connect GitHub'; } }",
+      " else if(m.type==='imageAttached'){ var c=document.getElementById('imageChip'); if(c){ c.style.display='block'; c.textContent='📎 Attached: '+m.name+' — your next question will be asked about this image. Tap to remove.'; } }",
+      " else if(m.type==='imageCleared'){ var c2=document.getElementById('imageChip'); if(c2){ c2.style.display='none'; c2.textContent=''; } }",
       " else if(m.type==='stream'){ if(!currentBubble) currentBubble=addMsg('','ai'); if(currentBubble.textContent==='Thinking…') currentBubble.textContent=''; currentBubble.textContent += m.text; }",
       " else if(m.type==='assistant'){ if(currentBubble && (currentBubble.textContent==='Thinking…' || currentBubble.textContent==='')){ currentBubble.remove(); } currentBubble=null; addMsg(m.text,'ai'); }",
       " else if(m.type==='streamDone'){ if(currentBubble && currentBubble.textContent==='Thinking…'){ currentBubble.remove(); } currentBubble=null; }",

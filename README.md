@@ -5,7 +5,7 @@
 
 **Vyntra is a AI coding agent for Antigravity. It runs on the models already on your own computer, in your own editor, with no cloud account, no API key, and no code sent to a remote service to answer you.**
 
-[![Version](https://img.shields.io/badge/Version-v0.9.41-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
+[![Version](https://img.shields.io/badge/Version-v0.9.42-8b5cf6?style=for-the-badge)](https://github.com/1nc24cs146-cmyk/Vyntra)
 [![Models](https://img.shields.io/badge/Models-Ollama_local-10b981?style=for-the-badge)](#-choosing-a-model)
 [![License](https://img.shields.io/badge/License-MIT-0f172a?style=for-the-badge)](LICENSE)
 
@@ -23,7 +23,7 @@
 
 | | |
 |---|---|
-| **Extension** | `localnest.localnest-antigravity` — v0.9.41, live on Open VSX |
+| **Extension** | `localnest.localnest-antigravity` — v0.9.42, live on Open VSX |
 | **Editor** | Antigravity |
 | **Models** | Ollama on your own machine — no cloud model, no API key |
 | **Account** | None. No sign-in, no subscription, no telemetry |
@@ -121,6 +121,17 @@ Type a skill at the start of your message, in any mode, with your local Ollama m
 | `/github` | GitHub account: `/github connect` links your account with a personal access token, `/github status` shows the connection and this folder's git state, `/github disconnect` forgets the token. A Connect GitHub button sits at the top of the panel too |
 | `/push` | Pushes this project's changes to GitHub: writes the commit message from your changes (like `/commit`), shows it to you, and waits for you to reply `push it` — nothing is committed or pushed until you say so. If only commits are waiting, it pushes those. Also in the Command Palette: "Vyntra: Push Changes to GitHub" |
 | `/publish` | Publishes this whole project to GitHub as a new repository: asks the repo name and Private/Public first, creates it on your account, then pushes the project to it. Also in the Command Palette: "Vyntra: Publish Project to GitHub" |
+| `/pr` | Writes a pull request description from the git diff — title, summary, what changed, why, and how to test. `/pr` on its own reads the diff (staged first, then unstaged); `/pr staged` or `/pr all` force the scope. Also in the Command Palette: "Vyntra: Write PR Description from Git Diff" |
+| `/rename` | Renames a symbol across the whole project: `/rename oldName newName` searches every file, shows each place (file + line), and changes nothing until you reply `yes, rename`. Also in the Command Palette: "Vyntra: Rename Symbol Across Project" |
+| `/release` | Writes release notes from your commits — grouped Added / Fixed / Docs / Changed, with the next version suggested (minor when a feature landed, patch for fixes only). Reads the commits since the last tag, or the last 20 when there is no tag. Also in the Command Palette: "Vyntra: Write Release Notes from Commits" |
+| `/vision` | Reads a screenshot with a vision model: tap 📎 Attach image next to Send, then ask what it shows — or `/vision <path to the image> <your question>`. Needs a vision model in Ollama (moondream is small and fast on CPU, llava:7b is the bigger one); a code model cannot see images. Also in the Command Palette: "Vyntra: Read a Screenshot with a Vision Model" |
+
+## 🆕 What's new in 0.9.42
+
+- **PR description from the diff (`/pr`).** Type `/pr` on its own and LocalNest reads your changes (staged first, unstaged when nothing is staged) and writes the pull request description: a title, a 2-3 line summary, what changed grouped by area, why, and concrete how-to-test steps — based only on the diff, never invented. `/pr staged` and `/pr all` force the scope. Command Palette: "Vyntra: Write PR Description from Git Diff".
+- **Rename across the whole project (`/rename`).** Type `/rename oldName newName` and LocalNest searches every file in the project, shows every place the name appears (file + line + the line itself), and waits for you to reply `yes, rename` — nothing changes until then. Whole-symbol matching only: `foo` inside `fooBar` is never renamed. node_modules, .git and build output are never searched. Command Palette: "Vyntra: Rename Symbol Across Project".
+- **Release notes from commits (`/release`).** Type `/release` and LocalNest reads the commits since the last tag (or the last 20 commits when there is no tag), groups them Added / Fixed / Docs / Changed, and writes the notes with the next version suggested — minor when a feature landed, patch for fixes only. Works without Ollama too: it shows the grouped commits as plain text. Command Palette: "Vyntra: Write Release Notes from Commits".
+- **Read error screenshots (`/vision`, 📎 Attach image).** Tap 📎 next to Send to attach a screenshot, then ask what it shows — "what's this error?" — and a vision model reads it and gives the fix. Or type `/vision <path to the image> <your question>`. The image goes only to your own Ollama host, is held in memory for one question, then dropped. Needs a vision model in Ollama: moondream is the small, fast one on CPU (pull with `ollama pull moondream`), llava:7b is the bigger alternative — a code model like qwen2.5-coder cannot see images at all, and LocalNest says so plainly instead of guessing. Command Palette: "Vyntra: Read a Screenshot with a Vision Model".
 
 ## 🆕 What's new in 0.9.41
 
@@ -238,6 +249,7 @@ The main commands, all in the Command Palette under "Vyntra: …":
 - Set Ollama Host, Set Model
 - Write Commit Message from Git Diff, Review Staged Changes
 - Connect GitHub Account, Disconnect GitHub Account, Show GitHub Status, Push Changes to GitHub, Publish Project to GitHub
+- Write PR Description from Git Diff, Rename Symbol Across Project, Write Release Notes from Commits, Read a Screenshot with a Vision Model
 
 ## 📄 License
 
